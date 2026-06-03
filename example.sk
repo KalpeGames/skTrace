@@ -1,0 +1,115 @@
+# example.sk
+# A tiny demo script to exercise Sktrace's profiler.
+# Drop this in plugins/Skript/scripts/ on a test server, run /sktrace start,
+# poke around in-game for ~60s, then /sktrace stop to see the report.
+#
+# Mixed trigger types so the report has variety:
+#  - player events (join, quit, chat)
+#  - combat (damage, death)
+#  - periodic tasks (every 1s, every 5 ticks)
+#  - commands (/stats, /heal)
+
+options:
+    prefix: &7[&6Demo&7]
+
+# ============================================================
+# Player events
+# ============================================================
+
+on join:
+    send "{@prefix} &fWelcome, &e%player%&f!" to player
+    set tab list header to "&6&lDemo Server" and footer to "&7Online: &e%amount of all players%" for player
+    if {first-join::%player's uuid%} is not set:
+        set {first-join::%player's uuid%} to now
+        give a stone sword named "&aStarter Sword" to player
+        broadcast "{@prefix} &e%player% &fjoined for the first time!"
+    set {online::%player's uuid%} to now
+
+on quit:
+    set {playtime::%player's uuid%} to difference between {online::%player's uuid%} and now
+    delete {online::%player's uuid%}
+
+on chat:
+    if {muted::%player's uuid%} is set:
+        cancel event
+        send "&cYou are muted." to player
+        stop
+    cancel event
+    set {_prefix} to {rank::%player's uuid%} ? "&7Player"
+    broadcast "%{_prefix}% &f%player%&8: &7%message%"
+
+# ============================================================
+# Combat
+# ============================================================
+
+on damage of player:
+    if attacker is a player:
+        add damage to {stats::damage-dealt::%attacker's uuid%}
+        play sound "entity.player.attack.strong" at victim with volume 0.5
+        if health of victim - damage <= 0:
+            stop
+        send action bar "&c❤ &f%health of victim - damage% / %max health of victim%" to victim
+
+on death of player:
+    if attacker is a player:
+        add 1 to {stats::kills::%attacker's uuid%}
+        add 1 to {stats::deaths::%victim's uuid%}
+        send "&a+ kill &7(%{stats::kills::%attacker's uuid%}% total)" to attacker
+        broadcast "{@prefix} &e%attacker% &fdefeated &e%victim%"
+
+# ============================================================
+# Periodic
+# ============================================================
+
+every 1 second:
+    loop all players:
+        set action bar of loop-player to "&7Online: &e%amount of all players%  &8|  &7Kills: &e%{stats::kills::%loop-player's uuid%} ? 0%"
+
+every 5 ticks:
+    loop all players:
+        if loop-player's gamemode is survival:
+            if loop-player's food level < 20:
+                # tiny passive regen demo — not realistic, just makes the trigger fire often
+                add 0.05 to loop-player's food level
+
+every 30 seconds:
+    broadcast "{@prefix} &fTip: type &e/stats &fto see your kill/death record."
+
+# ============================================================
+# Commands
+# ============================================================
+
+command /stats [<player>]:
+    description: View kill/death stats
+    trigger:
+        set {_p} to arg 1 ? player
+        send "&6=== Stats for &e%{_p}% &6==="
+        send "&7Kills:         &f%{stats::kills::%{_p}'s uuid%} ? 0%"
+        send "&7Deaths:        &f%{stats::deaths::%{_p}'s uuid%} ? 0%"
+        send "&7Damage dealt:  &f%{stats::damage-dealt::%{_p}'s uuid%} ? 0%"
+        send "&7First joined:  &f%{first-join::%{_p}'s uuid%} ? "never"%"
+
+command /heal [<player>]:
+    description: Fully heal a player
+    permission: demo.heal
+    trigger:
+        set {_p} to arg 1 ? player
+        set {_p}'s health to {_p}'s max health
+        set {_p}'s food level to 20
+        send "&a✔ Healed &e%{_p}%" to player
+        if {_p} is not player:
+            send "&aYou were healed by &e%player%" to {_p}
+
+command /mute <player>:
+    description: Mute a player in chat
+    permission: demo.mute
+    trigger:
+        set {muted::%arg 1's uuid%} to true
+        send "&c✔ Muted &e%arg 1%" to player
+
+command /unmute <player>:
+    description: Unmute a player
+    permission: demo.mute
+    trigger:
+        delete {muted::%arg 1's uuid%}
+        send "&a✔ Unmuted &e%arg 1%" to player

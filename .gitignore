@@ -1,0 +1,21 @@
+target/
+build/
+.gradle/
+*.iml
+.idea/
+.vscode/
+out/
+*.class
+dependency-reduced-pom.xml
+
+# Logs / OS cruft / archives
+*.log
+*.zip
+.DS_Store
+Thumbs.db
+
+# Local agent/session scratch
+.playwright-mcp/
+_*.html
+_*.css
+_*.tmp

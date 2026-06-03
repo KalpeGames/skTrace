@@ -1,0 +1,69 @@
+# Sktrace configuration.
+
+# Anonymous usage metrics via bStats (https://bstats.org). Sktrace reports
+# generic server info (server count, player count, server software and version,
+# Java version) plus three Sktrace-specific charts: whether the rolling buffer
+# is on, whether line-level profiling is on, and which Skript version is
+# installed. No personal or server-identifying data is collected. You can also
+# opt every bStats plugin out at once in
+# plugins/bStats/config.yml. Set to false to turn Sktrace's metrics off.
+metrics: true
+
+# Endpoint that /sktrace report uploads to. Reports are POSTed as text/html;
+# the server returns a JSON {"code","url"} pair and players get a clickable link.
+#
+# Default points at the public Sktrace worker (reports expire 24h after upload).
+# Set to an empty string to disable uploads entirely — reports will still be
+# written to plugins/Sktrace/reports/. To self-host, deploy the worker in this
+# repo's /worker directory and replace the URL.
+upload-endpoint: "https://sktrace.kal.pe/upload"
+
+# Rolling buffer — always-on background profiling so you can /sktrace clip a
+# snapshot of the last N seconds after a lag spike, without having had to run
+# /sktrace start ahead of time.
+#
+# When enabled, hooks are installed at plugin load and tick samples are kept in
+# a ring buffer sized to windowSeconds. /sktrace clip renders a report from the
+# current buffer contents without disturbing it. /sktrace rolling on|off
+# toggles this at runtime (and persists the change).
+#
+# Overhead is the same as a normal /sktrace start. Memory: ~20KB per trigger
+# plus ~20KB for global tick samples, per windowSeconds=60.
+#
+# Off by default — you opt in.
+rolling:
+  enabled: false
+  windowSeconds: 60
+
+# Line-level profiling (EXPERIMENTAL — off by default).
+#
+# When on, Sktrace instruments individual statements inside each trigger so the
+# report can show which exact lines are hottest and highlight them in the source
+# viewer. To do that it rewrites Skript's internal trigger graph via reflection.
+# That graph varies across Skript versions, addons, and script constructs
+# (multiline conditionals, loops, waits, custom sections), so in some cases it
+# can disturb how a script runs while profiling is active.
+#
+# Everything else in the report — per-event and per-trigger timing, the tick
+# chart, worst tick, time-by-script — does NOT use this and is unaffected.
+#
+# Leave this OFF on production servers. Turn it on only when you specifically
+# need per-line detail and can tolerate the risk on that server. This flag also
+# controls per-line detail INSIDE functions (see function-profiling below).
+line-level-profiling: false
+
+# Per-function profiling (on by default).
+#
+# When on, each Skript function gets its own row in the report's Functions table
+# (calls / total / avg / max), so you can see which function is eating time even
+# though its cost is normally hidden inside whatever trigger called it. Click a
+# function to view its body line-by-line.
+#
+# This is passive: it wraps each function's body the same way per-trigger timing
+# wraps triggers, with the same negligible overhead, and is fully removed when
+# profiling stops. Per-LINE timing inside a function additionally requires
+# line-level-profiling: true above.
+#
+# Turn this off only if you have an extremely hot function (called millions of
+# times per window) and want to drop even that small per-call overhead.
+function-profiling: true
