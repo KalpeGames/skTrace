@@ -4,6 +4,7 @@
 
 - **Added** function-level profiling: per-function timing in reports, with per-line detail inside functions available as an opt-in.
 - **Report UI:** mobile rendering fixes (legible tick chart, touch range-select, horizontally scrollable tables, ellipsized long names with tooltips), clearer labels, and worst-tick severity colors (green / amber / red).
+- **In-game UI:** refreshed all chat messages and the boss bar — a branded header rule on `/sktrace` help and `status`, tightened copy so nothing wraps, report flags moved into a hover, and an on-brand boss bar.
 
 ## [0.1.1] - 2026-06-01
 

@@ -77,10 +77,13 @@ public final class ProfilingIndicator implements Listener {
         long m = sec / 60;
         long s = sec % 60;
         String time = m > 0 ? m + "m " + s + "s" : s + "s";
-        return Component.text("▶ ", OK, TextDecoration.BOLD)
-                .append(Component.text("Sktrace profiling", TEXT, TextDecoration.BOLD))
-                .append(Component.text("   ", TEXT))
-                .append(Component.text(time, ACCENT))
-                .append(Component.text(" elapsed", DIM));
+        // Root at empty (unstyled) so BOLD on the glyph/name doesn't inherit into
+        // the rest of the title — Adventure propagates unset decorations downward.
+        return Component.empty()
+                .append(Component.text("▶ ", OK, TextDecoration.BOLD))
+                .append(Component.text("skTrace", TEXT, TextDecoration.BOLD))
+                .append(Component.text(" profiling", TEXT))
+                .append(Component.text("  ·  ", DIM))
+                .append(Component.text(time, ACCENT));
     }
 }
