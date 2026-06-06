@@ -1,6 +1,14 @@
 # Changelog
 
-## [0.1.2] - Unreleased
+## [0.1.3] - Unreleased
+
+- **Added** a variable viewer in reports: how many global variables were created, updated, and deleted during the window, the most-written ones, and a writes-per-tick sparkline. It passively observes Skript's variable save path — the same path that writes `variables.csv` (or your database) — without touching how scripts run, and it never reads or scans your existing variables, so there is no cost from a large `variables.csv`. Global variables only (local `{_temp}` variables are never persisted, so cannot be tracked). On by default; opt out with `variable-tracking: false`.
+- **Added** the ability to open a report on the website by uploading its file. The `.json` report file is now a complete, self-contained report, so when an auto-upload is skipped or fails (for example HTTP 413, "report too large"), `/sktrace report` points you to the homepage where you can drop the `.json` in and get a shareable link. On busy servers the variable list is collapsed behind a "Show variables" dropdown so it never overwhelms the page.
+- **Added** a running count of reports shared, displayed on the website.
+- **Added** a [bStats](https://bstats.org/plugin/bukkit/skTrace/31715) chart tracking how many servers enable variable tracking.
+- **Added** automatic config migration: updating skTrace now merges any new `config.yml` options into your existing file (keeping every setting you've changed), instead of leaving a stale config behind on update. skTrace also warns at startup if the experimental `line-level-profiling` is enabled, since it can disturb how some scripts run while profiling.
+
+## [0.1.2] - 2026-06-03
 
 - **Added** function-level profiling: per-function timing in reports, with per-line detail inside functions available as an opt-in.
 - **Report UI:** mobile rendering fixes (legible tick chart, touch range-select, horizontally scrollable tables, ellipsized long names with tooltips), clearer labels, and worst-tick severity colors (green / amber / red).

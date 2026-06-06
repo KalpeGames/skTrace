@@ -7,6 +7,7 @@ import dev.sktrace.profiler.EventStats;
 import dev.sktrace.profiler.ItemStats;
 import dev.sktrace.profiler.Profiler;
 import dev.sktrace.profiler.TriggerStats;
+import dev.sktrace.profiler.VariableTracker;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
@@ -43,20 +44,19 @@ public final class ReportWriter {
     }
 
     public Path write(boolean includeSources) throws IOException {
-        return writeRendered(renderHtml(includeSources, false), includeSources, false);
-    }
-
-    public Path writeRendered(String html, boolean includeSources) throws IOException {
-        return writeRendered(html, includeSources, false);
+        String dataJson = renderDataJson(includeSources, false, true);
+        return writeRendered(renderShell(dataJson), dataJson, includeSources, false);
     }
 
     /**
-     * Persist an HTML body that's already been rendered, plus the JSON sidecar.
-     * Used when the same HTML is also being uploaded — avoids rendering twice.
-     * Clip mode just changes the filename prefix so users can distinguish on-demand
-     * clips from full /sktrace start/stop reports in their reports/ folder.
+     * Persist a rendered HTML body plus the JSON sidecar. The sidecar holds the SAME data blob
+     * that's embedded in the HTML ({@code window.SKTRACE_DATA}), so it can be uploaded to the
+     * share worker to reproduce the identical report — handy when auto-upload fails (e.g. HTTP
+     * 413 on a large capture). Clip mode just changes the filename prefix so users can
+     * distinguish on-demand clips from full /sktrace start/stop reports in their reports/ folder.
      */
-    public Path writeRendered(String html, boolean includeSources, boolean clipMode) throws IOException {
+    public Path writeRendered(String html, String dataJson, boolean includeSources, boolean clipMode)
+            throws IOException {
         Path dir = plugin.getDataFolder().toPath().resolve("reports");
         Files.createDirectories(dir);
 
@@ -65,7 +65,7 @@ public final class ReportWriter {
         Path jsonPath = dir.resolve(stem + ".json");
 
         Files.writeString(htmlPath, html, StandardCharsets.UTF_8);
-        Files.writeString(jsonPath, renderJson(), StandardCharsets.UTF_8);
+        Files.writeString(jsonPath, dataJson, StandardCharsets.UTF_8);
 
         return htmlPath;
     }
@@ -79,6 +79,35 @@ public final class ReportWriter {
     }
 
     public String renderHtml(boolean includeSources, boolean clipMode, boolean maskSecrets) {
+        return renderShell(renderDataJson(includeSources, clipMode, maskSecrets));
+    }
+
+    /**
+     * Wrap the trusted static shell around an already-built data blob. Public so callers that
+     * computed the blob to also write it as the {@code .json} sidecar don't have to build it
+     * twice (and so the embedded HTML and the sidecar are guaranteed identical).
+     *
+     * The whole page = trusted static shell + the data blob. Every visible element (header,
+     * glance, tables, charts) is rendered client-side from the data by report.app.js. The share
+     * worker reuses the same shell + JS, stores only this JSON, and never serves uploaded HTML —
+     * see ../sktrace-web/src/index.ts.
+     */
+    public String renderShell(String dataJson) {
+        return SHELL
+                .replace("{{FONT_URL}}", assetUrl("fonts.css"))
+                .replace("{{LOGO_LIGHT}}", assetUrl("logo-light.png"))
+                .replace("{{LOGO_DARK}}", assetUrl("logo-dark.png"))
+                .replace("{{CSS}}", CSS)
+                .replace("{{APP_JS}}", APP_JS)
+                .replace("{{DATA_JSON}}", dataJson);
+    }
+
+    /**
+     * Build just the profiler data blob (the {@code window.SKTRACE_DATA} object). This is exactly
+     * what gets embedded in the HTML <em>and</em> written as the {@code .json} sidecar, so
+     * uploading the sidecar to the share worker reproduces the identical report.
+     */
+    public String renderDataJson(boolean includeSources, boolean clipMode, boolean maskSecrets) {
         List<TriggerStats> allTriggers = profiler.triggerStats().values().stream()
                 .sorted(Comparator.comparingLong(TriggerStats::totalNanos).reversed())
                 .toList();
@@ -112,27 +141,16 @@ public final class ReportWriter {
         }
 
         String generatedAt = LocalDateTime.now().format(HUMAN_TS);
-        String data = renderTickJsonData(activeTriggers, activeFunctions, sources, durationMs,
-                includeSources, clipMode, allTriggers.size(), silentCount, generatedAt);
-
-        // The whole page = trusted static shell + the data blob. Every visible element
-        // (header, glance, tables, charts) is rendered client-side from the data by
-        // report.app.js. The share worker reuses the same shell + JS, stores only this
-        // JSON, and never serves uploaded HTML — see worker/src/index.ts.
-        return SHELL
-                .replace("{{FONT_URL}}", assetUrl("fonts.css"))
-                .replace("{{LOGO_LIGHT}}", assetUrl("logo-light.png"))
-                .replace("{{LOGO_DARK}}", assetUrl("logo-dark.png"))
-                .replace("{{CSS}}", CSS)
-                .replace("{{APP_JS}}", APP_JS)
-                .replace("{{DATA_JSON}}", data);
+        return renderTickJsonData(activeTriggers, activeFunctions, sources, durationMs,
+                includeSources, clipMode, allTriggers.size(), silentCount, generatedAt, maskSecrets);
     }
 
     private String renderTickJsonData(List<TriggerStats> activeTriggers,
                                       List<TriggerStats> activeFunctions,
                                       Map<String, String> sources, long windowMs,
                                       boolean sourcesIncluded, boolean clipMode,
-                                      int totalTriggers, int silentCount, String generatedAt) {
+                                      int totalTriggers, int silentCount, String generatedAt,
+                                      boolean maskSecrets) {
         long[] totals = profiler.tickSamplesCopy();
         long[] durations = profiler.tickDurationsCopy();
         StringBuilder sb = new StringBuilder(activeTriggers.size() * 256 + totals.length * 16);
@@ -186,6 +204,7 @@ public final class ReportWriter {
                     .append(",\"maxNs\":").append(e.maxNanos()).append('}');
         }
         sb.append("]");
+        appendVariablesJson(sb, maskSecrets);
         // Script sources are emitted ONCE here as a shared map (script name -> text),
         // never inline per unit. Many functions (and triggers) share one script file,
         // so inlining duplicated the same source dozens of times and could push a
@@ -259,6 +278,55 @@ public final class ReportWriter {
             sb.append("]");
         }
         sb.append("}");
+    }
+
+    /**
+     * Append {@code ,"variables":{...}} describing GLOBAL variable writes observed during the
+     * window. When tracking is off/unavailable we still emit the object with {@code ok:false} plus
+     * a reason, so the report can explain why the section is empty. Only variable NAMES (and a
+     * Skript serialized-type tag) are emitted — never values; under {@code maskSecrets}, names that
+     * look sensitive are redacted the same way option values are.
+     */
+    private void appendVariablesJson(StringBuilder sb, boolean maskSecrets) {
+        VariableTracker vt = profiler.variableTracker();
+        sb.append(",\"variables\":{");
+        if (vt == null || !vt.ok()) {
+            sb.append("\"ok\":false,\"reason\":\"")
+                    .append(jsonEscape(vt == null
+                            ? "Variable tracking is off. Enable variable-tracking in config.yml."
+                            : String.valueOf(vt.reason())))
+                    .append("\"}");
+            return;
+        }
+        sb.append("\"ok\":true")
+                .append(",\"creates\":").append(vt.creates())
+                .append(",\"updates\":").append(vt.updates())
+                .append(",\"deletes\":").append(vt.deletes())
+                .append(",\"distinct\":").append(vt.distinct())
+                .append(",\"capped\":").append(vt.capped());
+        long[] perTick = vt.perTickCopy();
+        sb.append(",\"perTick\":[");
+        for (int i = 0; i < perTick.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(perTick[i]);
+        }
+        sb.append("],\"top\":[");
+        boolean first = true;
+        for (VariableTracker.VarStat v : vt.topVars(50)) {
+            if (!first) sb.append(',');
+            first = false;
+            String name = (maskSecrets && looksSensitive(v.name.toLowerCase(Locale.ROOT)))
+                    ? maskValue(v.name) : v.name;
+            sb.append("{\"name\":\"").append(jsonEscape(name)).append("\"")
+                    .append(",\"sets\":").append(v.sets)
+                    .append(",\"deletes\":").append(v.deletes)
+                    .append(",\"created\":").append(v.created);
+            if (v.lastType != null) {
+                sb.append(",\"type\":\"").append(jsonEscape(v.lastType)).append("\"");
+            }
+            sb.append('}');
+        }
+        sb.append("]}");
     }
 
     /**
@@ -450,55 +518,6 @@ public final class ReportWriter {
     private static final String APP_JS = loadResource("/report.app.js");
 
     private static final String SHELL = loadResource("/report.shell.html");
-
-    private String renderJson() {
-        StringBuilder sb = new StringBuilder(4096);
-        sb.append("{\"generatedAt\":\"").append(LocalDateTime.now().format(HUMAN_TS)).append("\",")
-                .append("\"durationMs\":").append(profiler.isRunning()
-                        ? System.currentTimeMillis() - profiler.startedAtMillis()
-                        : Math.max(0, profiler.stoppedAtMillis() - profiler.startedAtMillis()))
-                .append(",\"triggerHooks\":").append(profiler.triggerHooksAvailable())
-                .append(",\"tickNanos\":[");
-        long[] ticks = profiler.tickSamplesCopy();
-        for (int i = 0; i < ticks.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(ticks[i]);
-        }
-        sb.append("],\"tickDurationNanos\":[");
-        long[] durs = profiler.tickDurationsCopy();
-        for (int i = 0; i < durs.length; i++) {
-            if (i > 0) sb.append(',');
-            sb.append(durs[i]);
-        }
-        sb.append("],\"triggers\":[");
-
-        boolean first = true;
-        for (TriggerStats t : profiler.triggerStats().values()) {
-            if (t.calls() == 0) continue;
-            if (!first) sb.append(',');
-            first = false;
-            sb.append("{\"script\":\"").append(jsonEscape(t.scriptName()))
-                    .append("\",\"line\":").append(t.line())
-                    .append(",\"name\":\"").append(jsonEscape(t.triggerName()))
-                    .append("\",\"calls\":").append(t.calls())
-                    .append(",\"totalNanos\":").append(t.totalNanos())
-                    .append(",\"avgNanos\":").append(t.avgNanos())
-                    .append(",\"maxNanos\":").append(t.maxNanos()).append('}');
-        }
-        sb.append("],\"events\":[");
-        first = true;
-        for (EventStats e : profiler.eventStats().values()) {
-            if (!first) sb.append(',');
-            first = false;
-            sb.append("{\"event\":\"").append(jsonEscape(e.eventClassName()))
-                    .append("\",\"calls\":").append(e.calls())
-                    .append(",\"totalNanos\":").append(e.totalNanos())
-                    .append(",\"avgNanos\":").append(e.avgNanos())
-                    .append(",\"maxNanos\":").append(e.maxNanos()).append('}');
-        }
-        sb.append("]}");
-        return sb.toString();
-    }
 
     /**
      * Escapes a string for embedding as a JSON string literal inside an inline

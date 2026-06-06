@@ -67,3 +67,25 @@ line-level-profiling: false
 # Turn this off only if you have an extremely hot function (called millions of
 # times per window) and want to drop even that small per-call overhead.
 function-profiling: true
+
+# Variable tracking (on by default).
+#
+# Records how many GLOBAL variables are written during a capture and which were
+# created / updated / deleted, so the report's Variables section can show what's
+# churning your variables.csv.
+#
+# How it works: Sktrace passively observes Skript's variable save path — the same
+# path that writes variables.csv (or your database). It never changes how scripts
+# run, and it never reads or scans your existing variables, so there is NO cost
+# from a large variables.csv. If your Skript version's internals differ, tracking
+# quietly disables itself and the report says so; nothing else is affected.
+#
+# Scope: GLOBAL (persisted) variables only. Local/temporary {_variables} live only
+# for the duration of an event and are never saved, so they cannot be tracked.
+variable-tracking: true
+
+# Caps how many distinct variable NAMES are listed individually in the report (the
+# most-written ones). The headline totals (created/updated/deleted) stay accurate
+# beyond this cap — only the per-name list is bounded, to keep memory in check on
+# servers that touch a huge number of distinct variables.
+variable-tracking-max-distinct: 5000

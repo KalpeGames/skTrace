@@ -1403,6 +1403,96 @@
     }
   }
 
+  // ===========================================================
+  // VARIABLES — global variable writes observed during the
+  // window (the variables.csv / database ones). Stays hidden
+  // when tracking is off or unavailable on this Skript version.
+  // ===========================================================
+  function renderVariables(){
+    var v = data.variables;
+    var section = document.getElementById('variables-section');
+    if (!section || !v || !v.ok) return;   // section stays hidden
+    section.hidden = false;
+
+    var list = v.top || [];
+
+    var note = document.getElementById('vars-note');
+    if (note){
+      if (v.capped) note.textContent = 'A distinct-name cap was reached, so more names changed than are listed.';
+      else if (v.distinct && list.length < v.distinct) note.textContent = 'Showing the ' + fmtInt(list.length) + ' most-written of ' + fmtInt(v.distinct) + ' variables.';
+      else note.textContent = '';
+    }
+
+    var top = document.getElementById('vars-top');
+    if (top){
+      var spark = (v.perTick && v.perTick.length) ? makeSparkline(v.perTick) : '';
+      top.innerHTML =
+        '<div class="vars-stat"><b>Total writes</b><span class="v">' + fmtInt((v.creates||0)+(v.updates||0)+(v.deletes||0)) + '</span></div>' +
+        '<div class="vars-stat"><b>Created</b><span class="v">' + fmtInt(v.creates||0) + '</span></div>' +
+        '<div class="vars-stat"><b>Updated</b><span class="v">' + fmtInt(v.updates||0) + '</span></div>' +
+        '<div class="vars-stat"><b>Deleted</b><span class="v">' + fmtInt(v.deletes||0) + '</span></div>' +
+        '<div class="vars-stat"><b>Distinct names</b><span class="v">' + fmtInt(v.distinct||0) + (v.capped ? '+' : '') + '</span></div>' +
+        (spark ? '<div class="vars-spark" title="variable writes per tick">' + spark + '</div>' : '');
+    }
+
+    var tbody = document.getElementById('vars-tbody');
+    var toggle = document.getElementById('vars-toggle');
+    var wrap = document.getElementById('vars-tablewrap');
+
+    if (list.length === 0){
+      if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty">No global variable writes recorded during the window.</td></tr>';
+      if (wrap) wrap.hidden = false;   // nothing to collapse — just show the note
+      if (toggle) toggle.hidden = true;
+      return;
+    }
+
+    if (tbody){
+      var maxW = 0;
+      for (var i = 0; i < list.length; i++){
+        var w = (list[i].sets||0) + (list[i].deletes||0);
+        if (w > maxW) maxW = w;
+      }
+      var html = '';
+      for (var i = 0; i < list.length; i++){
+        var r = list[i];
+        var rw = (r.sets||0) + (r.deletes||0);
+        var pct = maxW > 0 ? (100 * rw / maxW).toFixed(1) : 0;
+        var net = (r.sets||0) - (r.deletes||0);
+        var badge = r.created ? '<span class="vars-badge">new</span>' : '';
+        // Stored names have no braces; wrap for the familiar {name} / {list::key} look.
+        html += '<tr>'
+          + '<td class="heat-cell"><div class="heat-track"><div class="heat-bar" style="width:' + pct + '%"></div></div></td>'
+          + '<td><span class="var-name">{' + esc(r.name) + '}</span>' + badge + '</td>'
+          + '<td class="num dim">' + fmtInt(r.sets||0) + '</td>'
+          + '<td class="num dim">' + fmtInt(r.deletes||0) + '</td>'
+          + '<td class="num">' + (net >= 0 ? '+' : '') + fmtInt(net) + '</td>'
+          + '<td class="dim">' + (r.type ? esc(r.type) : '—') + '</td>'
+          + '</tr>';
+      }
+      tbody.innerHTML = html;
+    }
+
+    // Collapsed-by-default disclosure so a long variable list never dominates the report
+    // (servers can churn thousands of variables). Summary + sparkline stay visible above.
+    if (toggle && wrap){
+      var shown = list.length;
+      var label = function(open){
+        return (open ? 'Hide variables' : 'Show variables (' + fmtInt(shown) + ')')
+          + ' <span class="chev">▾</span>';
+      };
+      toggle.hidden = false;
+      wrap.hidden = true;
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.innerHTML = label(false);
+      toggle.onclick = function(){
+        var willOpen = wrap.hidden;
+        wrap.hidden = !willOpen;
+        toggle.setAttribute('aria-expanded', String(willOpen));
+        toggle.innerHTML = label(willOpen);
+      };
+    }
+  }
+
   // Render in priority order so the page feels responsive even with thousands of
   // ticks: chrome + chart + breakdown immediately, then secondary cards next frame,
   // then the (potentially long) triggers table on the frame after.
@@ -1415,6 +1505,7 @@
     requestAnimationFrame(function(){
       renderTriggersTable();
       renderFunctionsTable();
+      renderVariables();
     });
   });
 })();

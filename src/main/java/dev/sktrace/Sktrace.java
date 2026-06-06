@@ -20,6 +20,15 @@ public final class Sktrace extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        // Bukkit only writes config.yml when it's missing, so an existing install never gets keys
+        // added in a later version. Merge any new options in (keeping the user's current settings)
+        // so updates don't leave a stale config behind.
+        int addedKeys = ConfigUpdater.merge(this);
+        if (addedKeys > 0) {
+            getLogger().info("config.yml updated: added " + addedKeys
+                    + " new option(s) from this version. Your existing settings were kept.");
+        }
+        warnIfRisky();
         profiler = new Profiler(this);
         indicator = new ProfilingIndicator(this, profiler);
         getServer().getPluginManager().registerEvents(indicator, this);
@@ -48,6 +57,19 @@ public final class Sktrace extends JavaPlugin {
         }
     }
 
+    // Surfaces a config setting that can disturb running scripts, so a stale config carried over
+    // from an old install (or one that opted in long ago) doesn't silently keep biting. We warn
+    // rather than auto-disable: it's the user's setting to make.
+    private void warnIfRisky() {
+        if (getConfig().getBoolean("line-level-profiling", false)) {
+            getLogger().warning("line-level-profiling is ENABLED. It is experimental and rewrites "
+                    + "Skript's internal trigger graph, which can disturb how some scripts run while "
+                    + "profiling (notably addon sections such as SkBee's spawn section). If scripts "
+                    + "misbehave ONLY while profiling, set line-level-profiling: false in config.yml "
+                    + "(it is off by default).");
+        }
+    }
+
     // Starts bStats metrics unless the user opted out (locally via config, or
     // globally via plugins/bStats/config.yml — the Metrics constructor honours
     // the global toggle itself). bStats handles its own ~30-minute submit timer
@@ -69,6 +91,8 @@ public final class Sktrace extends JavaPlugin {
                 () -> getConfig().getBoolean("rolling.enabled", false) ? "enabled" : "disabled"));
         metrics.addCustomChart(new SimplePie("line_level_profiling",
                 () -> getConfig().getBoolean("line-level-profiling", false) ? "enabled" : "disabled"));
+        metrics.addCustomChart(new SimplePie("variable_tracking",
+                () -> getConfig().getBoolean("variable-tracking", true) ? "enabled" : "disabled"));
         metrics.addCustomChart(new SimplePie("skript_version", () -> {
             var skript = getServer().getPluginManager().getPlugin("Skript");
             return skript != null ? skript.getDescription().getVersion() : "unknown";

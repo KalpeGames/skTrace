@@ -70,6 +70,12 @@ public final class Profiler {
     // config switch so a server hitting a pathological hot function can turn it off.
     // Per-line timing INSIDE functions still rides on lineLevelTracing above.
     private boolean functionProfiling;
+    // Per-window global-variable write tracking. Passive: observes Skript's async variable
+    // save path (the variables.csv writers) without touching script execution. On by default;
+    // see config.yml `variable-tracking`. The tracker is created per start() and kept after
+    // stop() so the report can read the collected stats; null when disabled/unavailable.
+    private boolean variableTracking;
+    private VariableTracker variableTracker;
     // Per-script source content, loaded lazily during install so we can map each
     // tracked item to its source line. Cleared on stop() so a re-install picks up
     // the current state of files on disk.
@@ -145,6 +151,7 @@ public final class Profiler {
         schedulerSwaps.clear();
         functionSwaps.clear();
         scriptSourceCache.clear();
+        variableTracker = null;
         int initial = tickCapacity > 0 ? tickCapacity : 1024;
         tickSamples = new long[initial];
         tickDurationNanos = new long[initial];
@@ -156,6 +163,7 @@ public final class Profiler {
         rolling = false;  // startRolling() flips this back on after we return
         lineLevelTracing = plugin.getConfig().getBoolean("line-level-profiling", false);
         functionProfiling = plugin.getConfig().getBoolean("function-profiling", true);
+        variableTracking = plugin.getConfig().getBoolean("variable-tracking", true);
         installEventHooks();
         installTriggerHooks();
         // After trigger hooks (functions aren't in the event registries) and before the
@@ -164,6 +172,15 @@ public final class Profiler {
         // naturally skips it, so functions don't get double-wrapped into triggerStats.
         if (functionProfiling) installFunctionHooks();
         installSchedulerHooks();
+        // Variable tracking is independent of the trigger/function hooks above: it observes the
+        // variable persistence path, not the execution graph. Created here so it's ready before
+        // the tick aggregator starts sampling its per-tick write series.
+        if (variableTracking) {
+            variableTracker = new VariableTracker(plugin,
+                    Math.max(1, plugin.getConfig().getInt("variable-tracking-max-distinct", 5000)),
+                    tickCapacity);
+            variableTracker.install();
+        }
         plugin.getLogger().info("Line-level profiling: " + (lineLevelTracing
                 ? "ENABLED (experimental — instruments individual lines by rewriting Skript's trigger graph)."
                 : "disabled (passive event/trigger timing only). Set line-level-profiling: true in config.yml to enable."));
@@ -188,6 +205,9 @@ public final class Profiler {
         uninstallBodyTracers();
         uninstallTriggerHooks();
         uninstallEventHooks();
+        // Stop observing variable writes, but keep the tracker (and its collected stats) so a
+        // report written after stop can still read them. It's cleared on the next start().
+        if (variableTracker != null) variableTracker.uninstall();
         running = false;
         rolling = false;
         stoppedAtMillis = System.currentTimeMillis();
@@ -221,6 +241,7 @@ public final class Profiler {
         for (TriggerStats s : functionStats.values()) {
             s.snapshotTick();
         }
+        if (variableTracker != null) variableTracker.snapshotTick();
         selfOverheadNanos.addAndGet(System.nanoTime() - t0);
     }
 
@@ -279,6 +300,8 @@ public final class Profiler {
     public Map<String, TriggerStats> triggerStats() { return triggerStats; }
     public Map<String, EventStats> eventStats() { return eventStats; }
     public Map<String, TriggerStats> functionStats() { return functionStats; }
+    /** The variable-write tracker for the current/last window, or null when disabled/unavailable. */
+    public VariableTracker variableTracker() { return variableTracker; }
     public Map<Integer, ItemStats> itemStats(String triggerId) {
         Map<Integer, ItemStats> m = itemStats.get(triggerId);
         return m == null ? Collections.emptyMap() : m;

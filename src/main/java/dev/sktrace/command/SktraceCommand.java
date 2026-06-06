@@ -185,13 +185,16 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
     }
 
     private void doReport(CommandSender s, boolean includeSources, boolean upload, boolean clipMode, boolean maskSecrets) {
-        // Always write the local file first — instant feedback, useful offline.
+        // Always write the local file first — instant feedback, useful offline. The .json
+        // sidecar holds the same data blob as the HTML, so it can be uploaded by hand to
+        // reproduce the report when auto-upload is off or fails.
         final Path localPath;
         final String html;
         try {
             ReportWriter writer = new ReportWriter(plugin, profiler);
-            html = writer.renderHtml(includeSources, clipMode, maskSecrets);
-            localPath = writer.writeRendered(html, includeSources, clipMode);
+            String dataJson = writer.renderDataJson(includeSources, clipMode, maskSecrets);
+            html = writer.renderShell(dataJson);
+            localPath = writer.writeRendered(html, dataJson, includeSources, clipMode);
         } catch (Exception e) {
             s.sendMessage(glyphLine("✗", CRIT,
                     Component.text(clipMode ? "Clip failed: " : "Report failed: ", TEXT)
@@ -199,6 +202,9 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
             plugin.getLogger().warning((clipMode ? "Clip" : "Report") + " failed: " + e);
             return;
         }
+
+        // File name of the JSON sidecar (same stem as the .html) — what users drag onto the site.
+        final String jsonName = localPath.getFileName().toString().replaceFirst("\\.html$", ".json");
 
         s.sendMessage(glyphLine("✓", OK,
                 Component.text(clipMode ? "Clip written.  " : "Report written.  ", TEXT)
@@ -224,10 +230,12 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         String endpoint = plugin.uploadEndpoint();
         if (!upload) {
             s.sendMessage(line(Component.text("  Upload skipped (--no-upload).", DIM)));
+            manualUploadHint(s, jsonName);
             return;
         }
         if (endpoint == null || endpoint.isBlank()) {
             s.sendMessage(line(Component.text("  Upload skipped (no endpoint configured).", DIM)));
+            manualUploadHint(s, jsonName);
             return;
         }
 
@@ -237,9 +245,19 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
             try {
                 url = new ReportUploader(endpoint).upload(html, includeSources);
             } catch (Exception ex) {
-                Bukkit.getScheduler().runTask(plugin, () ->
+                // 413 = the report was too big for the endpoint. The JSON sidecar is much smaller
+                // than the HTML (no embedded shell/CSS/JS), so a manual upload often gets through.
+                boolean tooLarge = ex instanceof ReportUploader.UploadException ue && ue.status() == 413;
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (tooLarge) {
+                        s.sendMessage(line(Component.text("  ✗ Too large to auto-upload.", CRIT)
+                                .append(Component.text("  The report exceeded the server's size limit.", DIM))));
+                    } else {
                         s.sendMessage(line(Component.text("  ✗ Upload failed: ", CRIT)
-                                .append(Component.text(String.valueOf(ex.getMessage()), CRIT)))));
+                                .append(Component.text(String.valueOf(ex.getMessage()), CRIT))));
+                    }
+                    manualUploadHint(s, jsonName);
+                });
                 plugin.getLogger().warning((clipMode ? "Clip" : "Report") + " upload failed: " + ex);
                 return;
             }
@@ -251,6 +269,38 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
                 s.sendMessage(line(Component.text("  Public link; expires in 24h.", DIM)));
             });
         });
+    }
+
+    /**
+     * Points the user at the manual-upload fallback: the {@code .json} sidecar in
+     * plugins/Sktrace/reports/ can be dropped onto the site to get a shareable report. Shown
+     * whenever an auto-uploaded link wasn't produced (--no-upload, no endpoint, or a failure
+     * such as HTTP 413).
+     */
+    private void manualUploadHint(CommandSender s, String jsonFileName) {
+        String site = siteBaseUrl();
+        s.sendMessage(line(Component.text("  ↪ ", ACCENT)
+                .append(Component.text("Share it yourself: upload ", DIM))
+                .append(Component.text(jsonFileName, MUTED))
+                .append(Component.text(" (in plugins/Sktrace/reports/) at ", DIM))
+                .append(Component.text(site, ACCENT, TextDecoration.UNDERLINED)
+                        .clickEvent(ClickEvent.openUrl(site))
+                        .hoverEvent(HoverEvent.showText(Component.text("Open " + site + " to upload your report", MUTED))))));
+    }
+
+    /** Site origin derived from the configured upload endpoint (scheme://host), for the manual
+     *  upload hint. Falls back to the public host. */
+    private String siteBaseUrl() {
+        try {
+            String ep = plugin.uploadEndpoint();
+            if (ep != null && !ep.isBlank()) {
+                java.net.URI u = java.net.URI.create(ep);
+                if (u.getScheme() != null && u.getAuthority() != null) {
+                    return u.getScheme() + "://" + u.getAuthority();
+                }
+            }
+        } catch (Exception ignored) { }
+        return "https://sktrace.kal.pe";
     }
 
     private void doClip(CommandSender s, boolean includeSources, boolean upload, boolean maskSecrets) {

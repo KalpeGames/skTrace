@@ -23,7 +23,7 @@ public final class ReportUploader {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
-    private static final String USER_AGENT = "Sktrace/0.1.1";
+    private static final String USER_AGENT = "Sktrace/0.1.3";
 
     private final String endpoint;
     private final HttpClient client;
@@ -57,10 +57,25 @@ public final class ReportUploader {
         if (resp.statusCode() / 100 != 2) {
             String snippet = resp.body();
             if (snippet.length() > 200) snippet = snippet.substring(0, 200) + "…";
-            throw new IOException("upload failed: HTTP " + resp.statusCode() + " — " + snippet);
+            throw new UploadException(resp.statusCode(),
+                    "upload failed: HTTP " + resp.statusCode() + " — " + snippet);
         }
 
         return extractUrl(resp.body());
+    }
+
+    /**
+     * Thrown on a non-2xx response, carrying the HTTP status so callers can special-case it —
+     * notably 413 (the report body exceeded the endpoint's size limit), which is exactly the
+     * case where we steer the user toward uploading the smaller JSON sidecar by hand.
+     */
+    public static final class UploadException extends IOException {
+        private final int status;
+        public UploadException(int status, String message) {
+            super(message);
+            this.status = status;
+        }
+        public int status() { return status; }
     }
 
     // Tiny purpose-built JSON field extractor — we control both ends of this contract,
