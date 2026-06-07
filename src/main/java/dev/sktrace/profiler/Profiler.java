@@ -76,6 +76,11 @@ public final class Profiler {
     // stop() so the report can read the collected stats; null when disabled/unavailable.
     private boolean variableTracking;
     private VariableTracker variableTracker;
+    // Companion to variableTracker: watches variables.csv for Skript's periodic full rewrite
+    // (the 5-minute saveTask). Passive (a filesystem WatchService, never touches Skript), gated by
+    // the same variable-tracking config, and only active for flat-file storage. Kept after stop()
+    // so the report can read the flushes it observed; null when disabled/unavailable.
+    private VariableFlushTracker variableFlushTracker;
     // Per-script source content, loaded lazily during install so we can map each
     // tracked item to its source line. Cleared on stop() so a re-install picks up
     // the current state of files on disk.
@@ -152,6 +157,7 @@ public final class Profiler {
         functionSwaps.clear();
         scriptSourceCache.clear();
         variableTracker = null;
+        variableFlushTracker = null;
         int initial = tickCapacity > 0 ? tickCapacity : 1024;
         tickSamples = new long[initial];
         tickDurationNanos = new long[initial];
@@ -180,6 +186,11 @@ public final class Profiler {
                     Math.max(1, plugin.getConfig().getInt("variable-tracking-max-distinct", 5000)),
                     tickCapacity);
             variableTracker.install();
+            // Watch the CSV for Skript's periodic full rewrite. Independent of the queue observer
+            // above: that counts in-memory writes; this catches the rewrite to disk and how long it
+            // took, so a save can be lined up against a tick-time spike.
+            variableFlushTracker = new VariableFlushTracker(plugin);
+            variableFlushTracker.install();
         }
         plugin.getLogger().info("Line-level profiling: " + (lineLevelTracing
                 ? "ENABLED (experimental — instruments individual lines by rewriting Skript's trigger graph)."
@@ -208,6 +219,7 @@ public final class Profiler {
         // Stop observing variable writes, but keep the tracker (and its collected stats) so a
         // report written after stop can still read them. It's cleared on the next start().
         if (variableTracker != null) variableTracker.uninstall();
+        if (variableFlushTracker != null) variableFlushTracker.uninstall();
         running = false;
         rolling = false;
         stoppedAtMillis = System.currentTimeMillis();
@@ -242,6 +254,7 @@ public final class Profiler {
             s.snapshotTick();
         }
         if (variableTracker != null) variableTracker.snapshotTick();
+        if (variableFlushTracker != null) variableFlushTracker.tick();
         selfOverheadNanos.addAndGet(System.nanoTime() - t0);
     }
 
@@ -302,6 +315,8 @@ public final class Profiler {
     public Map<String, TriggerStats> functionStats() { return functionStats; }
     /** The variable-write tracker for the current/last window, or null when disabled/unavailable. */
     public VariableTracker variableTracker() { return variableTracker; }
+    /** The variables.csv full-rewrite watcher for the current/last window, or null when disabled/unavailable. */
+    public VariableFlushTracker variableFlushTracker() { return variableFlushTracker; }
     public Map<Integer, ItemStats> itemStats(String triggerId) {
         Map<Integer, ItemStats> m = itemStats.get(triggerId);
         return m == null ? Collections.emptyMap() : m;

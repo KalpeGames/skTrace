@@ -7,6 +7,8 @@
 - **Added** a running count of reports shared, displayed on the website.
 - **Added** a [bStats](https://bstats.org/plugin/bukkit/skTrace/31715) chart tracking how many servers enable variable tracking.
 - **Added** automatic config migration: updating skTrace now merges any new `config.yml` options into your existing file (keeping every setting you've changed), instead of leaving a stale config behind on update. skTrace also warns at startup if the experimental `line-level-profiling` is enabled, since it can disturb how some scripts run while profiling.
+- **Added** disk-save tracking: skTrace now detects Skript's periodic full rewrite of `variables.csv` (the save that runs about every 5 minutes) when it happens during a capture, and draws it as a band on the tick chart alongside roughly how long it took and the file size. While that rewrite runs it holds Skript's variable lock, so scripts setting variables stall until it finishes — this lets you see at a glance whether a save lines up with a lag spike. It watches the file on disk (never reads its contents) and only applies to flat-file storage; part of `variable-tracking`.
+- **Report UI:** the Triggers, Functions, Events, and trigger-breakdown (selected-range) tables now show the top 5 rows with a "Show N more" dropdown for the rest (the kept rows follow whatever column you sort by), matching the Variables list. The breakdown's old fixed 40-row cutoff is replaced by this dropdown, so every trigger in a range is reachable.
 
 ## [0.1.2] - 2026-06-03
 

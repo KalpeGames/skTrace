@@ -82,6 +82,12 @@ function-profiling: true
 #
 # Scope: GLOBAL (persisted) variables only. Local/temporary {_variables} live only
 # for the duration of an event and are never saved, so they cannot be tracked.
+#
+# It also watches for Skript's periodic FULL rewrite of variables.csv (the save that
+# runs roughly every 5 minutes) and marks it on the tick chart with ~how long it took
+# and how big the file is, so you can see whether a save lines up with a lag spike.
+# This is done by watching the file on disk (never by reading its contents) and only
+# applies to flat-file storage; on a database backend the report says so.
 variable-tracking: true
 
 # Caps how many distinct variable NAMES are listed individually in the report (the

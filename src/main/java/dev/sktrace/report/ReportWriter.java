@@ -7,6 +7,7 @@ import dev.sktrace.profiler.EventStats;
 import dev.sktrace.profiler.ItemStats;
 import dev.sktrace.profiler.Profiler;
 import dev.sktrace.profiler.TriggerStats;
+import dev.sktrace.profiler.VariableFlushTracker;
 import dev.sktrace.profiler.VariableTracker;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
@@ -205,6 +206,7 @@ public final class ReportWriter {
         }
         sb.append("]");
         appendVariablesJson(sb, maskSecrets);
+        appendFlushJson(sb, totals.length);
         // Script sources are emitted ONCE here as a shared map (script name -> text),
         // never inline per unit. Many functions (and triggers) share one script file,
         // so inlining duplicated the same source dozens of times and could push a
@@ -325,6 +327,51 @@ public final class ReportWriter {
                 sb.append(",\"type\":\"").append(jsonEscape(v.lastType)).append("\"");
             }
             sb.append('}');
+        }
+        sb.append("]}");
+    }
+
+    /**
+     * Append {@code ,"varFlush":{...}} describing Skript's periodic full rewrites of variables.csv
+     * observed during the window. Emitted at the top level (not nested under "variables") because the
+     * tick chart draws a "save" band from it regardless of whether in-memory write tracking succeeded.
+     *
+     * <p>Each flush carries chart indices, not raw tick ordinals: the watcher counts absolute ticks
+     * across the whole run, but the chart only shows the last {@code visibleTicks} of them in rolling
+     * mode, so we subtract the dropped-prefix offset and drop any save that fell entirely before the
+     * visible window.
+     */
+    private void appendFlushJson(StringBuilder sb, int visibleTicks) {
+        VariableFlushTracker ft = profiler.variableFlushTracker();
+        sb.append(",\"varFlush\":{");
+        if (ft == null || !ft.ok()) {
+            sb.append("\"ok\":false,\"reason\":\"")
+                    .append(jsonEscape(ft == null
+                            ? "Variable tracking is off. Enable variable-tracking in config.yml."
+                            : String.valueOf(ft.reason())))
+                    .append("\"}");
+            return;
+        }
+        // Map absolute tick ordinals onto the visible chart: index = ordinal - (total - visible).
+        long offset = Math.max(0, ft.totalTicks() - visibleTicks);
+        sb.append("\"ok\":true,\"events\":[");
+        boolean first = true;
+        for (VariableFlushTracker.Flush f : ft.flushes()) {
+            long endIdx = f.endTick - offset;
+            if (endIdx < 0) continue;                       // ended before the visible window starts
+            long startIdx = Math.max(0, f.startTick - offset);
+            long lastIdx = Math.max(0, visibleTicks - 1);
+            if (endIdx > lastIdx) endIdx = lastIdx;
+            if (startIdx > lastIdx) startIdx = lastIdx;
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"startIdx\":").append(startIdx)
+                    .append(",\"endIdx\":").append(endIdx)
+                    .append(",\"durationMs\":")
+                    .append(f.durationNanos < 0 ? "null" : String.format(Locale.ROOT, "%.1f", f.durationNanos / 1e6))
+                    .append(",\"bytes\":").append(f.bytes)
+                    .append(",\"changes\":").append(f.changes < 0 ? "null" : Integer.toString(f.changes))
+                    .append('}');
         }
         sb.append("]}");
     }

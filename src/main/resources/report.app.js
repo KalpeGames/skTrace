@@ -5,6 +5,10 @@
   var duration = data.tickDuration || [];
   var triggers = data.triggers || [];
   var functions = data.functions || [];
+  // Skript's periodic full rewrites of variables.csv during the window (see VariableFlushTracker).
+  // Drawn as bands on the tick chart and listed in the Variables section. Empty when none occurred.
+  var varFlush = data.varFlush || { ok:false };
+  var flushes = (varFlush.ok && varFlush.events) || [];
   var ns = total.length;
   var overheadNs = data.overheadNs || 0;
   var windowMs = data.windowMs || (ns * 50);
@@ -21,6 +25,12 @@
     fn:   { col:'totalNs', dir:'desc' }
   };
   var STRING_COLS = { script:1, name:1 };
+
+  // Top-N row collapsing for the long tables. Show the first TOP_N rows, hide the rest behind a
+  // "Show N more" toggle. Re-applied on every render so the visible rows track the current sort;
+  // the expanded/collapsed choice persists per table across re-sorts.
+  var TOP_N = 5;
+  var rowsExpanded = { trig:false, fn:false, events:false, brk:false };
 
   function isDefaultSort(key){
     return sortState[key].col === defaultSort[key].col
@@ -54,6 +64,42 @@
     if (btn) btn.hidden = isDefaultSort(key);
   }
 
+  // Collapse a freshly-rendered table to its top TOP_N rows, inserting (once) a "Show N more"
+  // toggle after the table. Called after each (re)render so the kept rows always reflect the
+  // current sort order; rowsExpanded[key] remembers the user's choice across re-renders.
+  function applyRowLimit(key, tbody){
+    if (!tbody) return;
+    var dataRows = [];
+    for (var i = 0; i < tbody.children.length; i++){
+      var tr = tbody.children[i];
+      if (tr.querySelector && tr.querySelector('td.empty')) continue;   // skip placeholder rows
+      dataRows.push(tr);
+    }
+    var toggle = document.getElementById(key + '-rows-toggle');
+    if (dataRows.length <= TOP_N){
+      if (toggle) toggle.hidden = true;
+      return;
+    }
+    if (!toggle){
+      var wrap = tbody.closest('.table-wrap');
+      toggle = document.createElement('button');
+      toggle.id = key + '-rows-toggle';
+      toggle.className = 'rows-toggle';
+      toggle.setAttribute('type', 'button');
+      if (wrap && wrap.parentNode) wrap.parentNode.insertBefore(toggle, wrap.nextSibling);
+    }
+    toggle.hidden = false;
+    var hiddenCount = dataRows.length - TOP_N;
+    function paint(){
+      var open = rowsExpanded[key];
+      for (var i = TOP_N; i < dataRows.length; i++) dataRows[i].style.display = open ? '' : 'none';
+      toggle.innerHTML = (open ? 'Show fewer' : 'Show ' + fmtInt(hiddenCount) + ' more') + ' <span class="chev">▾</span>';
+      toggle.setAttribute('aria-expanded', String(open));
+    }
+    paint();
+    toggle.onclick = function(){ rowsExpanded[key] = !rowsExpanded[key]; paint(); };
+  }
+
   var SVG_NS = 'http://www.w3.org/2000/svg';
   function el(name, attrs){
     var e = document.createElementNS(SVG_NS, name);
@@ -68,6 +114,17 @@
   function fmtMs(n){ return (n / 1e6).toFixed(2) }
   function fmtMs1(n){ return (n / 1e6).toFixed(1) }
   function fmtInt(n){ return n.toLocaleString('en-US') }
+  function fmtBytes(n){
+    if (n == null || n < 0) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+  function fmtDur(ms){
+    if (ms == null) return 'duration n/a';
+    return ms >= 1000 ? '~' + (ms / 1000).toFixed(2) + ' s' : '~' + Math.round(ms) + ' ms';
+  }
 
   // Floating tooltip shared by donut + histogram hover.
   var tipEl = document.getElementById('tip');
@@ -804,6 +861,7 @@
     tbody.innerHTML = html;
     updateHeaderState('table[data-table="trig"]', 'trig');
     updateResetButton('trig');
+    applyRowLimit('trig', tbody);
   }
 
   // ===========================================================
@@ -859,6 +917,7 @@
     tbody.innerHTML = html;
     updateHeaderState('table[data-table="fn"]', 'fn');
     updateResetButton('fn');
+    applyRowLimit('fn', tbody);
   }
   function formatTime(nsv){
     if (nsv < 1000) return nsv.toFixed(0) + '<span class="unit">ns</span>';
@@ -905,7 +964,7 @@
   var breakdownEl = document.getElementById('selection-breakdown');
   var resetBtn = document.getElementById('reset-zoom');
 
-  var padX = 44, padTop = 18, padBottom = 28;
+  var padX = 50, padTop = 18, padBottom = 28;
   var viewW = 1200, viewH = 280;
   var chartW = viewW - padX * 2;
   var chartH = viewH - padTop - padBottom;
@@ -964,6 +1023,9 @@
       if (v > maxNs) maxNs = v;
     }
     var yMaxNs = Math.max(6e7, maxNs * 1.18);
+    // When a big lag spike pushes the scale into the thousands of ms, switch the whole axis to
+    // seconds so labels stay short (and readable) instead of overflowing the left margin.
+    var axisInSeconds = (yMaxNs / 1e6) >= 1000;
 
     for (var g = 0; g <= 4; g++){
       var gy = padTop + chartH * g / 4;
@@ -985,7 +1047,9 @@
         fill: cAxis, 'font-size': 11, 'text-anchor': 'end',
         'font-family': '"IBM Plex Mono", ui-monospace, monospace'
       });
-      lt.textContent = (labelMs >= 10 ? labelMs.toFixed(0) : labelMs.toFixed(1)) + 'ms';
+      lt.textContent = axisInSeconds
+        ? (labelMs / 1000).toFixed(1) + 's'
+        : (labelMs >= 10 ? labelMs.toFixed(0) : labelMs.toFixed(1)) + 'ms';
       svg.appendChild(lt);
     }
 
@@ -1045,6 +1109,39 @@
         x2: padX + chartW, y2: thresholdY.toFixed(1),
         stroke: cCrit, 'stroke-width': 1, opacity: '0.6'
       }));
+    }
+
+    drawFlushBands();
+  }
+
+  // variables.csv full-save band(s). Skript's periodic rewrite holds the variable read-lock the
+  // whole time, so scripts setting variables stall until it finishes — a save that overlaps a
+  // tick-time spike is the likely cause. Drawn on top at low opacity, clipped to the current zoom.
+  function drawFlushBands(){
+    if (!flushes.length) return;
+    var cSave = cssVar('--save-band') || '#7b6cf2';
+    var bspan = viewHi - viewLo;
+    for (var fi = 0; fi < flushes.length; fi++){
+      var f = flushes[fi];
+      if (f.endIdx < viewLo || f.startIdx > viewHi) continue;
+      var a = Math.max(viewLo, f.startIdx), b = Math.min(viewHi, f.endIdx);
+      var bx1 = padX + (bspan <= 0 ? 0 : ((a - viewLo) / bspan) * chartW);
+      var bx2 = padX + (bspan <= 0 ? chartW : ((b - viewLo) / bspan) * chartW);
+      var bw = Math.max(3, bx2 - bx1);
+      svg.appendChild(el('rect', {
+        x: bx1.toFixed(1), y: padTop, width: bw.toFixed(1), height: chartH,
+        fill: cSave, 'fill-opacity': '0.14', 'pointer-events': 'none'
+      }));
+      svg.appendChild(el('line', {
+        x1: bx1.toFixed(1), y1: padTop, x2: bx1.toFixed(1), y2: padTop + chartH,
+        stroke: cSave, 'stroke-width': 1, 'stroke-opacity': '0.7', 'pointer-events': 'none'
+      }));
+      var lbl = el('text', {
+        x: (bx1 + 3).toFixed(1), y: padTop + 11, fill: cSave, 'font-size': 10,
+        'font-family': '"IBM Plex Mono", ui-monospace, monospace', 'pointer-events': 'none'
+      });
+      lbl.textContent = 'save';
+      svg.appendChild(lbl);
     }
   }
 
@@ -1196,9 +1293,10 @@
         + '<th class="num sortable" data-sort="maxNs" title="Max single-call duration over the full window — Skript doesn\'t expose per-call samples, so this is not range-scoped.">Max</th>'
         + '<th class="num sortable" data-sort="pct">% of range</th>'
         + '</tr></thead><tbody>';
-      var top = rows.slice(0, 40);
-      for (var i = 0; i < top.length; i++){
-        var r = top[i];
+      // Render every row; the top-5 dropdown (applyRowLimit below) collapses the rest, the
+      // same way the Triggers/Functions/Events tables do, instead of a hard 40-row cutoff.
+      for (var i = 0; i < rows.length; i++){
+        var r = rows[i];
         var heatW = maxSum > 0 ? (100 * r.sum / maxSum).toFixed(1) : 0;
         var msCls = (isDefault && i < 3) ? 'num ms-hot' : 'num ms';
         var maxMs = r.maxNs / 1e6;
@@ -1218,11 +1316,11 @@
           + '</tr>';
       }
       html += '</tbody></table></div>';
-      if (rows.length > 40) html += '<div class="tfoot">+ ' + (rows.length - 40) + ' more triggers</div>';
     }
     breakdownEl.innerHTML = html;
     updateHeaderState('table[data-table="brk"]', 'brk');
     updateResetButton('brk');
+    applyRowLimit('brk', breakdownEl.querySelector('table[data-table="brk"] tbody'));
   }
 
   function applyView(lo, hi){
@@ -1400,6 +1498,7 @@
         }
         tbody.innerHTML = rows;
       }
+      applyRowLimit('events', tbody);
     }
   }
 
@@ -1409,21 +1508,39 @@
   // when tracking is off or unavailable on this Skript version.
   // ===========================================================
   function renderVariables(){
-    var v = data.variables;
+    var v = data.variables || {};
     var section = document.getElementById('variables-section');
-    if (!section || !v || !v.ok) return;   // section stays hidden
+    if (!section) return;
+    var haveStats = !!v.ok;
+    var haveFlush = flushes.length > 0;
+    if (!haveStats && !haveFlush) return;   // section stays hidden
     section.hidden = false;
+
+    renderFlushList(haveStats);
+
+    var note = document.getElementById('vars-note');
+    var top = document.getElementById('vars-top');
+    var tbody = document.getElementById('vars-tbody');
+    var toggle = document.getElementById('vars-toggle');
+    var wrap = document.getElementById('vars-tablewrap');
+
+    if (!haveStats){
+      // Flush-only: in-memory write tracking is unavailable, but we still observed disk saves.
+      if (note) note.textContent = '';
+      if (top) top.innerHTML = '';
+      if (toggle) toggle.hidden = true;
+      if (wrap) wrap.hidden = true;
+      return;
+    }
 
     var list = v.top || [];
 
-    var note = document.getElementById('vars-note');
     if (note){
       if (v.capped) note.textContent = 'A distinct-name cap was reached, so more names changed than are listed.';
       else if (v.distinct && list.length < v.distinct) note.textContent = 'Showing the ' + fmtInt(list.length) + ' most-written of ' + fmtInt(v.distinct) + ' variables.';
       else note.textContent = '';
     }
 
-    var top = document.getElementById('vars-top');
     if (top){
       var spark = (v.perTick && v.perTick.length) ? makeSparkline(v.perTick) : '';
       top.innerHTML =
@@ -1434,10 +1551,6 @@
         '<div class="vars-stat"><b>Distinct names</b><span class="v">' + fmtInt(v.distinct||0) + (v.capped ? '+' : '') + '</span></div>' +
         (spark ? '<div class="vars-spark" title="variable writes per tick">' + spark + '</div>' : '');
     }
-
-    var tbody = document.getElementById('vars-tbody');
-    var toggle = document.getElementById('vars-toggle');
-    var wrap = document.getElementById('vars-tablewrap');
 
     if (list.length === 0){
       if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="empty">No global variable writes recorded during the window.</td></tr>';
@@ -1491,6 +1604,32 @@
         toggle.innerHTML = label(willOpen);
       };
     }
+  }
+
+  // Disk saves observed during the window: each variables.csv full rewrite, with when it happened
+  // (seconds into the window), ~how long it took, the file size, and how many queued changes it
+  // compacted. When variable stats are present but no save occurred, says so.
+  function renderFlushList(haveStats){
+    var box = document.getElementById('vars-flush');
+    if (!box) return;
+    if (!flushes.length){
+      box.innerHTML = (haveStats && varFlush.ok)
+        ? '<div class="vars-flush-empty">No full variables.csv save occurred during this capture. Skript rewrites the whole file about every 5 minutes, once enough changes pile up.</div>'
+        : '';
+      return;
+    }
+    var rows = '';
+    for (var i = 0; i < flushes.length; i++){
+      var f = flushes[i];
+      var at = (f.startIdx / 20).toFixed(1);
+      var chg = (f.changes == null) ? '' : ' · compacted ' + fmtInt(f.changes) + ' changes';
+      rows += '<div class="flush-row">'
+        + '<span class="flush-dot"></span>'
+        + '<div class="flush-text"><div class="flush-main"><b>variables.csv full save</b> at ' + at + 's into the window</div>'
+        + '<div class="flush-meta">' + fmtDur(f.durationMs) + ' · ' + fmtBytes(f.bytes) + chg + '</div></div>'
+        + '</div>';
+    }
+    box.innerHTML = '<div class="vars-flush-head">Disk saves <span class="dim">— while a save runs, scripts setting variables block, so it can surface as the tick spike marked on the chart above.</span></div>' + rows;
   }
 
   // Render in priority order so the page feels responsive even with thousands of
