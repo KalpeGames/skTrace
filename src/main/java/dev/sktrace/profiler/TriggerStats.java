@@ -119,4 +119,23 @@ public final class TriggerStats {
         long c = calls();
         return c == 0 ? 0 : totalNanos() / c;
     }
+
+    // --- Windowed views: summed over the retained per-tick ring plus the in-progress tick. In
+    // rolling mode these reflect just the buffer window (instead of the ever-climbing session totals
+    // above); in one-shot mode the ring spans the whole run, so they equal calls()/totalNanos().
+    // Reports use these so a rolling clip's Calls/Total columns match its window.
+
+    private long sumValid(long[] arr) {
+        int n = (tickCapacity > 0) ? Math.min(tickNanosCount, tickCapacity) : tickNanosCount;
+        long s = 0;
+        for (int i = 0; i < n; i++) s += arr[i];
+        return s;
+    }
+
+    public synchronized long windowedCalls() { return sumValid(tickCalls) + currentTickCalls.get(); }
+    public synchronized long windowedTotalNanos() { return sumValid(tickNanos) + currentTickAcc.get(); }
+    public synchronized long windowedAvgNanos() {
+        long c = sumValid(tickCalls) + currentTickCalls.get();
+        return c == 0 ? 0 : (sumValid(tickNanos) + currentTickAcc.get()) / c;
+    }
 }

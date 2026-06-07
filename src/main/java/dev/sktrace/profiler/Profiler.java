@@ -189,7 +189,7 @@ public final class Profiler {
             // Watch the CSV for Skript's periodic full rewrite. Independent of the queue observer
             // above: that counts in-memory writes; this catches the rewrite to disk and how long it
             // took, so a save can be lined up against a tick-time spike.
-            variableFlushTracker = new VariableFlushTracker(plugin);
+            variableFlushTracker = new VariableFlushTracker(plugin, variableTracker);
             variableFlushTracker.install();
         }
         plugin.getLogger().info("Line-level profiling: " + (lineLevelTracing
@@ -252,6 +252,9 @@ public final class Profiler {
         }
         for (TriggerStats s : functionStats.values()) {
             s.snapshotTick();
+        }
+        for (EventStats e : eventStats.values()) {
+            e.snapshotTick();
         }
         if (variableTracker != null) variableTracker.snapshotTick();
         if (variableFlushTracker != null) variableFlushTracker.tick();
@@ -317,6 +320,30 @@ public final class Profiler {
     public VariableTracker variableTracker() { return variableTracker; }
     /** The variables.csv full-rewrite watcher for the current/last window, or null when disabled/unavailable. */
     public VariableFlushTracker variableFlushTracker() { return variableFlushTracker; }
+
+    /**
+     * Names (as {@link #scriptDisplayName} produces them, matching {@code TriggerStats.scriptName()})
+     * of the scripts Skript currently has loaded. Lets a report drop triggers/functions whose script
+     * was deleted/disabled/unloaded since they were hooked — otherwise their stats linger (especially
+     * in the long-lived rolling buffer, which never clears between clips). Returns {@code null} if
+     * Skript's loaded-script set can't be read, so callers fail open and prune nothing.
+     */
+    public java.util.Set<String> currentlyLoadedScriptNames() {
+        try {
+            Class<?> loaderClass = Class.forName("ch.njol.skript.ScriptLoader");
+            Object res = loaderClass.getMethod("getLoadedScripts").invoke(null);
+            if (!(res instanceof Collection<?> col)) return null;
+            java.util.Set<String> names = new java.util.HashSet<>();
+            for (Object script : col) {
+                if (script == null) continue;
+                String n = scriptDisplayName(script);
+                if (n != null && !n.equals("unknown")) names.add(n);
+            }
+            return names;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
     public Map<Integer, ItemStats> itemStats(String triggerId) {
         Map<Integer, ItemStats> m = itemStats.get(triggerId);
         return m == null ? Collections.emptyMap() : m;
@@ -345,7 +372,7 @@ public final class Profiler {
 
     void recordEvent(Class<? extends Event> cls, long nanos) {
         long t0 = System.nanoTime();
-        eventStats.computeIfAbsent(cls.getName(), EventStats::new).record(nanos);
+        eventStats.computeIfAbsent(cls.getName(), k -> new EventStats(k, tickCapacity)).record(nanos);
         selfOverheadNanos.addAndGet(System.nanoTime() - t0);
     }
 

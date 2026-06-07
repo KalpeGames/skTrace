@@ -360,6 +360,18 @@ td.spark-cell{width:88px;padding:6px 12px}
 .flush-main{font-size:13px;color:var(--text)}
 .flush-main b{font-family:"IBM Plex Mono",ui-monospace,monospace;font-weight:600}
 .flush-meta{font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums;margin-top:2px}
+.flush-vars{margin-top:8px}
+.flush-vars summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--save-band);list-style:none;user-select:none;width:fit-content}
+.flush-vars summary::-webkit-details-marker{display:none}
+.flush-vars summary::before{content:"▸ "}
+.flush-vars[open] summary::before{content:"▾ "}
+.flush-vars summary:hover{text-decoration:underline}
+.flush-vars-body{margin-top:8px;display:flex;flex-direction:column;gap:3px;max-height:340px;overflow:auto}
+.flush-var{font-size:12px;color:var(--text-2);word-break:break-all;line-height:1.5}
+.flush-var .var-name{font-size:12px}
+.flush-var-val{color:var(--text);font-family:"IBM Plex Mono",ui-monospace,monospace}
+.flush-var-type{color:var(--text-3)}
+.flush-var-del{color:var(--crit);font-weight:600}
 
 .script{font-family:"IBM Plex Mono",ui-monospace,monospace;color:var(--accent);font-size:12.5px}
 .script .lno{color:var(--text-3)}

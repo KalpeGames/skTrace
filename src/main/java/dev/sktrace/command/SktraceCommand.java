@@ -44,7 +44,7 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
     private static final List<String> SUBCOMMANDS =
             List.of("start", "stop", "status", "report", "clip", "rolling", "reset", "diag");
     private static final List<String> STATUS_HINTS = List.of("5", "10", "20", "50");
-    private static final List<String> REPORT_HINTS = List.of("--include-files", "--no-upload", "--show-secrets");
+    private static final List<String> REPORT_HINTS = List.of("--include-files", "--no-upload", "--show-secrets", "--variable-values");
     private static final List<String> ROLLING_HINTS = List.of("on", "off");
 
     private final Sktrace plugin;
@@ -68,8 +68,8 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
             case "start"   -> doStart(sender);
             case "stop"    -> doStop(sender);
             case "status"  -> doStatus(sender, parseTopN(args, 5));
-            case "report"  -> doReport(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), false, !hasFlag(args, "--show-secrets"));
-            case "clip"    -> doClip(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), !hasFlag(args, "--show-secrets"));
+            case "report"  -> doReport(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), false, !hasFlag(args, "--show-secrets"), hasFlag(args, "--variable-values"));
+            case "clip"    -> doClip(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), !hasFlag(args, "--show-secrets"), hasFlag(args, "--variable-values"));
             case "rolling" -> doRolling(sender, args.length >= 2 ? args[1] : null);
             case "reset"   -> doReset(sender);
             case "diag"    -> doDiag(sender);
@@ -91,10 +91,10 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         if (args.length == 2 && args[0].equalsIgnoreCase("status")) {
             return filter(STATUS_HINTS, args[1]);
         }
-        if (args[0].equalsIgnoreCase("report") && args.length >= 2 && args.length <= 3) {
+        if (args[0].equalsIgnoreCase("report") && args.length >= 2 && args.length <= 5) {
             return filter(REPORT_HINTS, args[args.length - 1]);
         }
-        if (args[0].equalsIgnoreCase("clip") && args.length >= 2 && args.length <= 3) {
+        if (args[0].equalsIgnoreCase("clip") && args.length >= 2 && args.length <= 5) {
             return filter(REPORT_HINTS, args[args.length - 1]);
         }
         if (args[0].equalsIgnoreCase("rolling") && args.length == 2) {
@@ -184,7 +184,8 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         profiler.runDiagnostic();
     }
 
-    private void doReport(CommandSender s, boolean includeSources, boolean upload, boolean clipMode, boolean maskSecrets) {
+    private void doReport(CommandSender s, boolean includeSources, boolean upload, boolean clipMode,
+                          boolean maskSecrets, boolean includeVariableValues) {
         // Always write the local file first — instant feedback, useful offline. The .json
         // sidecar holds the same data blob as the HTML, so it can be uploaded by hand to
         // reproduce the report when auto-upload is off or fails.
@@ -192,7 +193,7 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         final String html;
         try {
             ReportWriter writer = new ReportWriter(plugin, profiler);
-            String dataJson = writer.renderDataJson(includeSources, clipMode, maskSecrets);
+            String dataJson = writer.renderDataJson(includeSources, clipMode, maskSecrets, includeVariableValues);
             html = writer.renderShell(dataJson);
             localPath = writer.writeRendered(html, dataJson, includeSources, clipMode);
         } catch (Exception e) {
@@ -303,7 +304,8 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         return "https://sktrace.kal.pe";
     }
 
-    private void doClip(CommandSender s, boolean includeSources, boolean upload, boolean maskSecrets) {
+    private void doClip(CommandSender s, boolean includeSources, boolean upload, boolean maskSecrets,
+                        boolean includeVariableValues) {
         if (!profiler.isRolling()) {
             s.sendMessage(glyphLine("•", WARN, Component.text("Rolling buffer is off. Nothing to clip.", MUTED)));
             s.sendMessage(line(Component.text("  Enable with ", DIM)
@@ -320,7 +322,7 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
                 Component.text("Clipping last ", TEXT)
                         .append(Component.text(String.format("%.1fs", windowMs / 1000.0), MUTED))
                         .append(Component.text(" of activity…", DIM))));
-        doReport(s, includeSources, upload, true, maskSecrets);
+        doReport(s, includeSources, upload, true, maskSecrets, includeVariableValues);
     }
 
     private void doRolling(CommandSender s, String arg) {
@@ -525,7 +527,8 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
                 "Writes an HTML dashboard, then uploads it.\n"
                 + "--include-files  embed script source\n"
                 + "--no-upload  keep the file local\n"
-                + "--show-secrets  unmask option values");
+                + "--show-secrets  unmask option values\n"
+                + "--variable-values  list saved variables + values");
         helpRow(s, "clip",           "Snapshot the last N seconds");
         helpRow(s, "rolling on|off", "Toggle the rolling buffer");
         helpRow(s, "reset",          "Clear collected stats");

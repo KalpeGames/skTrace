@@ -50,6 +50,9 @@ import java.util.logging.Level;
 public final class VariableFlushTracker {
 
     private final Sktrace plugin;
+    // Source of the per-save variable list: rotated at each flush so a save can be paired with the
+    // variables it compacted. May be null (variable tracking disabled) — then flushes carry no vars.
+    private final VariableTracker variableTracker;
 
     private volatile boolean ok = false;
     private volatile String reason = "not installed";
@@ -75,13 +78,16 @@ public final class VariableFlushTracker {
     private long flushStartNanos = 0;
     private long flushStartTick = 0;
     private int flushStartChanges = -1;
+    // Variables compacted into the in-progress save, captured (rotated) at its start.
+    private List<VariableTracker.EpochVar> flushStartVars = Collections.emptyList();
 
     // Defensive cap: at ~one save per five minutes this is never hit in practice.
     private static final int MAX_FLUSHES = 256;
     private final List<Flush> flushes = Collections.synchronizedList(new ArrayList<>());
 
-    public VariableFlushTracker(Sktrace plugin) {
+    public VariableFlushTracker(Sktrace plugin, VariableTracker variableTracker) {
         this.plugin = plugin;
+        this.variableTracker = variableTracker;
     }
 
     /** One observed full rewrite of variables.csv. Tick fields are absolute ordinals (see {@link #ticks}). */
@@ -91,12 +97,15 @@ public final class VariableFlushTracker {
         public final long durationNanos;   // -1 if the start was missed (instant/coalesced event)
         public final long bytes;           // file size after the rewrite, -1 if unknown
         public final int changes;          // queued changes compacted, -1 if unknown
-        Flush(long startTick, long endTick, long durationNanos, long bytes, int changes) {
+        public final List<VariableTracker.EpochVar> vars;  // distinct variables compacted into this save
+        Flush(long startTick, long endTick, long durationNanos, long bytes, int changes,
+              List<VariableTracker.EpochVar> vars) {
             this.startTick = startTick;
             this.endTick = endTick;
             this.durationNanos = durationNanos;
             this.bytes = bytes;
             this.changes = changes;
+            this.vars = vars;
         }
     }
 
@@ -209,20 +218,26 @@ public final class VariableFlushTracker {
         // caught the counter after Skript reset it (event latency) — report it as unknown instead.
         int c = readChanges();
         flushStartChanges = c > 0 ? c : -1;
+        // The variables written since the previous save are exactly what this save compacts.
+        flushStartVars = variableTracker != null ? variableTracker.rotateEpoch() : Collections.emptyList();
     }
 
     private void finalizeFlush() {
         long dur = flushStartNanos > 0 ? System.nanoTime() - flushStartNanos : -1;
-        addFlush(new Flush(flushStartTick, ticks.get(), dur, csvFile.length(), flushStartChanges));
+        addFlush(new Flush(flushStartTick, ticks.get(), dur, csvFile.length(), flushStartChanges, flushStartVars));
         inFlush = false;
         flushStartNanos = 0;
         flushStartChanges = -1;
+        flushStartVars = Collections.emptyList();
     }
 
     /** We saw the temp vanish without seeing it appear (very fast save, events coalesced). */
     private void recordInstantFlush() {
         long t = ticks.get();
-        addFlush(new Flush(t, t, -1, csvFile.length(), -1));
+        // Still rotate so these writes aren't mis-attributed to the next save's list.
+        List<VariableTracker.EpochVar> vars = variableTracker != null
+                ? variableTracker.rotateEpoch() : Collections.emptyList();
+        addFlush(new Flush(t, t, -1, csvFile.length(), -1, vars));
     }
 
     private void addFlush(Flush f) {

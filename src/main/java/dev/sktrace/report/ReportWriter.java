@@ -45,7 +45,7 @@ public final class ReportWriter {
     }
 
     public Path write(boolean includeSources) throws IOException {
-        String dataJson = renderDataJson(includeSources, false, true);
+        String dataJson = renderDataJson(includeSources, false, true, false);
         return writeRendered(renderShell(dataJson), dataJson, includeSources, false);
     }
 
@@ -80,7 +80,7 @@ public final class ReportWriter {
     }
 
     public String renderHtml(boolean includeSources, boolean clipMode, boolean maskSecrets) {
-        return renderShell(renderDataJson(includeSources, clipMode, maskSecrets));
+        return renderShell(renderDataJson(includeSources, clipMode, maskSecrets, false));
     }
 
     /**
@@ -108,19 +108,42 @@ public final class ReportWriter {
      * what gets embedded in the HTML <em>and</em> written as the {@code .json} sidecar, so
      * uploading the sidecar to the share worker reproduces the identical report.
      */
-    public String renderDataJson(boolean includeSources, boolean clipMode, boolean maskSecrets) {
-        List<TriggerStats> allTriggers = profiler.triggerStats().values().stream()
-                .sorted(Comparator.comparingLong(TriggerStats::totalNanos).reversed())
+    public String renderDataJson(boolean includeSources, boolean clipMode, boolean maskSecrets,
+                                 boolean includeVariableValues) {
+        // Drop triggers/functions whose script Skript no longer has loaded (deleted/disabled/unloaded
+        // since they were hooked) so stale entries don't linger — notably in the rolling buffer, which
+        // never clears between clips. Fail open: if the loaded set is unreadable, or pruning would wipe
+        // every trigger that actually ran (a sign the name forms didn't line up), prune nothing.
+        // "Active" and ranking use WINDOWED calls/time so a rolling clip reflects its window
+        // (windowed == cumulative in one-shot). maxNs aside, every count below is window-scoped.
+        java.util.Set<String> loadedScripts = profiler.currentlyLoadedScriptNames();
+        List<TriggerStats> allRaw = profiler.triggerStats().values().stream()
+                .sorted(Comparator.comparingLong(TriggerStats::windowedTotalNanos).reversed())
                 .toList();
+        boolean prune = loadedScripts != null && !loadedScripts.isEmpty();
+        if (prune) {
+            boolean hadActive = allRaw.stream().anyMatch(t -> t.windowedCalls() > 0);
+            boolean keptActive = allRaw.stream()
+                    .filter(t -> scriptStillLoaded(t.scriptName(), loadedScripts))
+                    .anyMatch(t -> t.windowedCalls() > 0);
+            if (hadActive && !keptActive) prune = false;
+        }
+        final boolean pruneFinal = prune;
+        final java.util.Set<String> loadedFinal = loadedScripts;
+        java.util.function.Predicate<TriggerStats> keep =
+                t -> !pruneFinal || scriptStillLoaded(t.scriptName(), loadedFinal);
+
+        List<TriggerStats> allTriggers = allRaw.stream().filter(keep).toList();
         List<TriggerStats> activeTriggers = allTriggers.stream()
-                .filter(t -> t.calls() > 0)
+                .filter(t -> t.windowedCalls() > 0)
                 .toList();
         int silentCount = allTriggers.size() - activeTriggers.size();
         // Functions are a separate layer: ranked, but kept out of the trigger
         // aggregations (donut/worst-tick) since their time nests inside callers'.
         List<TriggerStats> activeFunctions = profiler.functionStats().values().stream()
-                .filter(t -> t.calls() > 0)
-                .sorted(Comparator.comparingLong(TriggerStats::totalNanos).reversed())
+                .filter(t -> t.windowedCalls() > 0)
+                .filter(keep)
+                .sorted(Comparator.comparingLong(TriggerStats::windowedTotalNanos).reversed())
                 .toList();
         long durationMs = profiler.effectiveWindowMs();
 
@@ -143,7 +166,8 @@ public final class ReportWriter {
 
         String generatedAt = LocalDateTime.now().format(HUMAN_TS);
         return renderTickJsonData(activeTriggers, activeFunctions, sources, durationMs,
-                includeSources, clipMode, allTriggers.size(), silentCount, generatedAt, maskSecrets);
+                includeSources, clipMode, allTriggers.size(), silentCount, generatedAt, maskSecrets,
+                includeVariableValues);
     }
 
     private String renderTickJsonData(List<TriggerStats> activeTriggers,
@@ -151,7 +175,7 @@ public final class ReportWriter {
                                       Map<String, String> sources, long windowMs,
                                       boolean sourcesIncluded, boolean clipMode,
                                       int totalTriggers, int silentCount, String generatedAt,
-                                      boolean maskSecrets) {
+                                      boolean maskSecrets, boolean includeVariableValues) {
         long[] totals = profiler.tickSamplesCopy();
         long[] durations = profiler.tickDurationsCopy();
         StringBuilder sb = new StringBuilder(activeTriggers.size() * 256 + totals.length * 16);
@@ -194,19 +218,20 @@ public final class ReportWriter {
         sb.append("],\"events\":[");
         boolean firstEv = true;
         for (EventStats e : profiler.eventStats().values().stream()
-                .sorted(Comparator.comparingLong(EventStats::totalNanos).reversed())
+                .filter(e -> e.windowedCalls() > 0)
+                .sorted(Comparator.comparingLong(EventStats::windowedTotalNanos).reversed())
                 .toList()) {
             if (!firstEv) sb.append(',');
             firstEv = false;
             sb.append("{\"name\":\"").append(jsonEscape(e.shortName())).append("\"")
-                    .append(",\"calls\":").append(e.calls())
-                    .append(",\"totalNs\":").append(e.totalNanos())
-                    .append(",\"avgNs\":").append(e.avgNanos())
+                    .append(",\"calls\":").append(e.windowedCalls())
+                    .append(",\"totalNs\":").append(e.windowedTotalNanos())
+                    .append(",\"avgNs\":").append(e.windowedAvgNanos())
                     .append(",\"maxNs\":").append(e.maxNanos()).append('}');
         }
         sb.append("]");
         appendVariablesJson(sb, maskSecrets);
-        appendFlushJson(sb, totals.length);
+        appendFlushJson(sb, totals.length, includeVariableValues, maskSecrets);
         // Script sources are emitted ONCE here as a shared map (script name -> text),
         // never inline per unit. Many functions (and triggers) share one script file,
         // so inlining duplicated the same source dozens of times and could push a
@@ -238,9 +263,11 @@ public final class ReportWriter {
         sb.append("{\"script\":\"").append(jsonEscape(t.scriptName())).append("\"")
                 .append(",\"line\":").append(t.line())
                 .append(",\"name\":\"").append(jsonEscape(t.triggerName())).append("\"")
-                .append(",\"calls\":").append(t.calls())
-                .append(",\"totalNs\":").append(t.totalNanos())
-                .append(",\"avgNs\":").append(t.avgNanos())
+                // Windowed: in rolling mode these reflect the buffer window, not the whole session.
+                // maxNs stays the all-time single-call peak (no per-call samples to window it by).
+                .append(",\"calls\":").append(t.windowedCalls())
+                .append(",\"totalNs\":").append(t.windowedTotalNanos())
+                .append(",\"avgNs\":").append(t.windowedAvgNanos())
                 .append(",\"maxNs\":").append(t.maxNanos())
                 .append(",\"nanos\":[");
         for (int i = 0; i < ticks.length; i++) {
@@ -341,7 +368,8 @@ public final class ReportWriter {
      * mode, so we subtract the dropped-prefix offset and drop any save that fell entirely before the
      * visible window.
      */
-    private void appendFlushJson(StringBuilder sb, int visibleTicks) {
+    private void appendFlushJson(StringBuilder sb, int visibleTicks, boolean includeVariableValues,
+                                 boolean maskSecrets) {
         VariableFlushTracker ft = profiler.variableFlushTracker();
         sb.append(",\"varFlush\":{");
         if (ft == null || !ft.ok()) {
@@ -370,10 +398,88 @@ public final class ReportWriter {
                     .append(",\"durationMs\":")
                     .append(f.durationNanos < 0 ? "null" : String.format(Locale.ROOT, "%.1f", f.durationNanos / 1e6))
                     .append(",\"bytes\":").append(f.bytes)
-                    .append(",\"changes\":").append(f.changes < 0 ? "null" : Integer.toString(f.changes))
-                    .append('}');
+                    .append(",\"changes\":").append(f.changes < 0 ? "null" : Integer.toString(f.changes));
+            if (includeVariableValues && f.vars != null && !f.vars.isEmpty()) {
+                appendFlushVars(sb, f.vars, maskSecrets);
+            }
+            sb.append('}');
         }
         sb.append("]}");
+    }
+
+    private static final int FLUSH_VARS_CAP = 100;    // most-written variables listed per save
+    private static final int FLUSH_VALUE_MAX = 200;   // characters of each value shown
+
+    /**
+     * Append {@code ,"vars":[{name,writes,deleted,value|type}]} — the distinct variables compacted
+     * into one save. Only emitted under {@code --variable-values}. Values are deserialized to the
+     * same display string Skript shows in-game; sensitive names (and their values) are masked unless
+     * {@code --show-secrets}, matching how option values are handled elsewhere.
+     */
+    private void appendFlushVars(StringBuilder sb, List<VariableTracker.EpochVar> vars, boolean maskSecrets) {
+        sb.append(",\"vars\":[");
+        boolean first = true;
+        int n = 0;
+        for (VariableTracker.EpochVar v : vars) {
+            if (n++ >= FLUSH_VARS_CAP) break;
+            if (!first) sb.append(',');
+            first = false;
+            boolean sensitive = maskSecrets && looksSensitive(v.name.toLowerCase(Locale.ROOT));
+            String name = sensitive ? maskValue(v.name) : v.name;
+            sb.append("{\"name\":\"").append(jsonEscape(name)).append("\"")
+                    .append(",\"writes\":").append(v.writes)
+                    .append(",\"deleted\":").append(v.deleted);
+            if (!v.deleted) {
+                String val = deserializeValue(v.type, v.data);
+                if (val != null) {
+                    if (val.length() > FLUSH_VALUE_MAX) val = val.substring(0, FLUSH_VALUE_MAX) + "…";
+                    if (sensitive) val = maskValue(val);
+                    sb.append(",\"value\":\"").append(jsonEscape(val)).append("\"");
+                } else if (v.type != null) {
+                    sb.append(",\"type\":\"").append(jsonEscape(v.type)).append("\"");
+                }
+            }
+            sb.append('}');
+        }
+        sb.append("]");
+    }
+
+    // Skript's variable (de)serializer, resolved once by reflection. null if its internals differ.
+    private static volatile java.lang.reflect.Method classesDeserialize;
+    private static volatile java.lang.reflect.Method classesToString;
+    private static volatile boolean classesResolved = false;
+
+    /**
+     * Best-effort: turn Skript's serialized {@code (type, bytes)} into the same display string Skript
+     * shows in-game, via {@code ch.njol.skript.registrations.Classes}. Returns null if it can't (the
+     * caller then falls back to the type tag). Runs at report time on the main thread, so object
+     * {@code toString} is safe.
+     */
+    private static String deserializeValue(String type, byte[] data) {
+        if (type == null || data == null) return null;
+        if (!classesResolved) resolveClassesApi();
+        if (classesDeserialize == null || classesToString == null) return null;
+        try {
+            Object o = classesDeserialize.invoke(null, type, data);
+            if (o == null) return null;
+            Object s = classesToString.invoke(null, o);
+            return s instanceof String str ? str : String.valueOf(o);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static synchronized void resolveClassesApi() {
+        if (classesResolved) return;
+        try {
+            Class<?> c = Class.forName("ch.njol.skript.registrations.Classes");
+            classesDeserialize = c.getMethod("deserialize", String.class, byte[].class);
+            classesToString = c.getMethod("toString", Object.class);
+        } catch (Throwable ignored) {
+            // Skript internals differ — values just won't deserialize; names/types still show.
+        } finally {
+            classesResolved = true;
+        }
     }
 
     /**
@@ -388,6 +494,11 @@ public final class ReportWriter {
      * resort handles the inverse case where the trigger reports a path but the file
      * happens to be at the root.
      */
+    /** Keep a stat whose script is still loaded (or whose script we couldn't resolve — never hide those). */
+    private static boolean scriptStillLoaded(String scriptName, java.util.Set<String> loaded) {
+        return scriptName == null || "unknown".equals(scriptName) || loaded.contains(scriptName);
+    }
+
     private Map<String, String> loadScriptSources(Set<String> wanted) {
         Map<String, String> out = new HashMap<>();
         if (wanted.isEmpty()) return out;

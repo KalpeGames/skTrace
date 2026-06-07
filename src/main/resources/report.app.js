@@ -1623,10 +1623,30 @@
       var f = flushes[i];
       var at = (f.startIdx / 20).toFixed(1);
       var chg = (f.changes == null) ? '' : ' · compacted ' + fmtInt(f.changes) + ' changes';
+      // Per-save variable list (only present when the report was made with --variable-values).
+      var varsHtml = '';
+      if (f.vars && f.vars.length){
+        var items = '';
+        for (var j = 0; j < f.vars.length; j++){
+          var vv = f.vars[j];
+          var val = vv.deleted
+            ? '<span class="flush-var-del">deleted</span>'
+            : (vv.value != null
+                ? '<span class="flush-var-val">= ' + esc(vv.value) + '</span>'
+                : (vv.type ? '<span class="flush-var-type">(' + esc(vv.type) + ')</span>' : ''));
+          items += '<div class="flush-var"><span class="var-name">{' + esc(vv.name) + '}</span> ' + val
+            + ' <span class="dim">' + fmtInt(vv.writes || 0) + '×</span></div>';
+        }
+        varsHtml = '<details class="flush-vars"><summary>Show ' + fmtInt(f.vars.length)
+          + ' variable' + (f.vars.length === 1 ? '' : 's') + '</summary>'
+          + '<div class="flush-vars-body">' + items + '</div></details>';
+      }
       rows += '<div class="flush-row">'
         + '<span class="flush-dot"></span>'
         + '<div class="flush-text"><div class="flush-main"><b>variables.csv full save</b> at ' + at + 's into the window</div>'
-        + '<div class="flush-meta">' + fmtDur(f.durationMs) + ' · ' + fmtBytes(f.bytes) + chg + '</div></div>'
+        + '<div class="flush-meta">' + fmtDur(f.durationMs) + ' · ' + fmtBytes(f.bytes) + chg + '</div>'
+        + varsHtml
+        + '</div>'
         + '</div>';
     }
     box.innerHTML = '<div class="vars-flush-head">Disk saves <span class="dim">— while a save runs, scripts setting variables block, so it can surface as the tick spike marked on the chart above.</span></div>' + rows;

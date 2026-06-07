@@ -19,7 +19,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.logging.Level;
 
 /**
@@ -63,10 +62,14 @@ public final class VariableTracker {
     private volatile boolean ok = false;
     private volatile String reason = "not installed";
 
-    private final LongAdder creates = new LongAdder();
-    private final LongAdder updates = new LongAdder();
-    private final LongAdder deletes = new LongAdder();
     private final AtomicLong currentTickWrites = new AtomicLong();
+    // Per-tick deltas for the create/update/delete split, folded into the ring buffers below each
+    // tick (parallel to perTick). The report reads these as windowed sums so its headline counts
+    // reflect the RETAINED WINDOW, not the whole session — critical in rolling mode, where a
+    // long-lived buffer would otherwise accumulate the count into the millions.
+    private final AtomicLong currentTickCreates = new AtomicLong();
+    private final AtomicLong currentTickUpdates = new AtomicLong();
+    private final AtomicLong currentTickDeletes = new AtomicLong();
 
     // name -> per-variable stats. Bounded: once maxDistinct distinct names have been seen we
     // stop adding new entries (aggregate totals stay correct) and flip `capped`. Written only on
@@ -74,9 +77,23 @@ public final class VariableTracker {
     private final Map<String, VarStat> vars = new ConcurrentHashMap<>();
     private volatile boolean capped = false;
 
+    // Per-flush "epoch": distinct global variables WRITTEN since the last flush boundary, each with
+    // its latest serialized value. VariableFlushTracker rotates this when a variables.csv save runs,
+    // so a report can answer "which variables (and values) made up that save's compacted changes".
+    // Captured cheaply on every write (just the latest value reference per name, memory-bounded);
+    // whether it reaches the report is a per-report choice (the --variable-values flag). volatile so
+    // rotate() can swap the whole map atomically against the save thread's writes.
+    private volatile ConcurrentHashMap<String, EpochVar> epoch = new ConcurrentHashMap<>();
+    private volatile long epochValueBytes = 0;                  // value bytes retained this epoch (soft cap)
+    private static final int MAX_VALUE_BYTES = 2048;            // don't retain a single value larger than this
+    private static final long MAX_EPOCH_VALUE_BYTES = 2_000_000;// nor keep more than this much value data total
+
     // Per-tick write counts, same ring/grow scheme as TriggerStats. Touched only on the main
     // thread (snapshotTick / perTickCopy), so a plain synchronized block is enough.
     private long[] perTick;
+    private long[] createsPerTick;
+    private long[] updatesPerTick;
+    private long[] deletesPerTick;
     private int perTickCount = 0;
     private int perTickPos = 0;
 
@@ -86,6 +103,7 @@ public final class VariableTracker {
     private Field svNameField;
     private Field svValueField;
     private Field valueTypeField;
+    private Field svDataField;
 
     public VariableTracker(Sktrace plugin, int maxDistinct, int tickCapacity) {
         this.plugin = plugin;
@@ -93,6 +111,9 @@ public final class VariableTracker {
         this.tickCapacity = Math.max(0, tickCapacity);
         int initial = this.tickCapacity > 0 ? this.tickCapacity : 1024;
         this.perTick = new long[initial];
+        this.createsPerTick = new long[initial];
+        this.updatesPerTick = new long[initial];
+        this.deletesPerTick = new long[initial];
     }
 
     // ---------- lifecycle ----------
@@ -168,35 +189,36 @@ public final class VariableTracker {
         boolean delete = extractValue(serializedVariable) == null;
 
         currentTickWrites.incrementAndGet();
+        recordEpoch(name, serializedVariable, delete);
 
         VarStat st = vars.get(name);
         if (st == null) {
             if (vars.size() >= maxDistinct) {
                 // At the distinct-name cap: keep aggregate totals correct but don't grow the map.
                 capped = true;
-                if (delete) deletes.increment(); else updates.increment();
+                if (delete) currentTickDeletes.incrementAndGet(); else currentTickUpdates.incrementAndGet();
                 return;
             }
             st = new VarStat(name);
             vars.put(name, st);
             if (delete) {            // delete of a name not yet seen this window
                 st.deletes++;
-                deletes.increment();
+                currentTickDeletes.incrementAndGet();
             } else {                 // first sight this window => created
                 st.created = true;
                 st.sets++;
                 st.lastType = extractType(serializedVariable);
-                creates.increment();
+                currentTickCreates.incrementAndGet();
             }
             return;
         }
         if (delete) {
             st.deletes++;
-            deletes.increment();
+            currentTickDeletes.incrementAndGet();
         } else {
             st.sets++;
             st.lastType = extractType(serializedVariable);
-            updates.increment();
+            currentTickUpdates.incrementAndGet();
         }
     }
 
@@ -204,17 +226,41 @@ public final class VariableTracker {
 
     synchronized void snapshotTick() {
         long w = currentTickWrites.getAndSet(0);
+        long c = currentTickCreates.getAndSet(0);
+        long u = currentTickUpdates.getAndSet(0);
+        long d = currentTickDeletes.getAndSet(0);
         if (tickCapacity > 0) {
             perTick[perTickPos] = w;
+            createsPerTick[perTickPos] = c;
+            updatesPerTick[perTickPos] = u;
+            deletesPerTick[perTickPos] = d;
             perTickPos = (perTickPos + 1) % tickCapacity;
             if (perTickCount < tickCapacity) perTickCount++;
         } else {
             if (perTickCount >= perTick.length) {
-                perTick = java.util.Arrays.copyOf(perTick, perTick.length * 2);
+                int grown = perTick.length * 2;
+                perTick = java.util.Arrays.copyOf(perTick, grown);
+                createsPerTick = java.util.Arrays.copyOf(createsPerTick, grown);
+                updatesPerTick = java.util.Arrays.copyOf(updatesPerTick, grown);
+                deletesPerTick = java.util.Arrays.copyOf(deletesPerTick, grown);
             }
-            perTick[perTickCount++] = w;
+            perTick[perTickCount] = w;
+            createsPerTick[perTickCount] = c;
+            updatesPerTick[perTickCount] = u;
+            deletesPerTick[perTickCount] = d;
+            perTickCount++;
             perTickPos = perTickCount;
         }
+    }
+
+    /** Sum of a per-tick ring over just the retained window (windowed in rolling mode, the whole
+     *  run otherwise). Order doesn't matter for a sum, so the ring is summed in place. Caller holds
+     *  the monitor (all callers are synchronized methods). */
+    private long sumValid(long[] arr) {
+        int n = (tickCapacity > 0) ? Math.min(perTickCount, tickCapacity) : perTickCount;
+        long s = 0;
+        for (int i = 0; i < n; i++) s += arr[i];
+        return s;
     }
 
     public synchronized long[] perTickCopy() {
@@ -233,10 +279,13 @@ public final class VariableTracker {
 
     public boolean ok() { return ok; }
     public String reason() { return reason; }
-    public long creates() { return creates.sum(); }
-    public long updates() { return updates.sum(); }
-    public long deletes() { return deletes.sum(); }
-    public long totalWrites() { return creates.sum() + updates.sum() + deletes.sum(); }
+    // Windowed: summed over the retained per-tick ring, so rolling-mode reports show counts for the
+    // buffer window rather than the whole (never-ending) session. In one-shot mode the ring spans the
+    // entire run, so these equal the session totals.
+    public synchronized long creates() { return sumValid(createsPerTick); }
+    public synchronized long updates() { return sumValid(updatesPerTick); }
+    public synchronized long deletes() { return sumValid(deletesPerTick); }
+    public synchronized long totalWrites() { return sumValid(perTick); }
     public int distinct() { return vars.size(); }
     public boolean capped() { return capped; }
 
@@ -257,6 +306,61 @@ public final class VariableTracker {
         public volatile boolean created = false;
         public volatile String lastType = null;
         VarStat(String name) { this.name = name; }
+    }
+
+    // ---------- per-flush epoch (writes since the last variables.csv save) ----------
+
+    /** A variable written during the current epoch. The value is kept as the raw serialized
+     *  (type, bytes) Skript produced and is only turned into a display string at report time
+     *  (and only if the report asks for values via --variable-values). */
+    public static final class EpochVar {
+        public final String name;
+        public long writes = 0;
+        public boolean deleted = false;
+        public String type = null;
+        public byte[] data = null;   // latest non-delete serialized value; null if delete or not retained
+        EpochVar(String name) { this.name = name; }
+    }
+
+    /** Record this write into the current epoch (runs on the save thread, same as {@link #record}). */
+    private void recordEpoch(String name, Object sv, boolean delete) {
+        ConcurrentHashMap<String, EpochVar> ep = epoch;
+        EpochVar ev = ep.get(name);
+        if (ev == null) {
+            if (ep.size() >= maxDistinct) return;   // same distinct-name bound as the cumulative map
+            EpochVar created = new EpochVar(name);
+            ev = ep.putIfAbsent(name, created);
+            if (ev == null) ev = created;
+        }
+        ev.writes++;
+        if (delete) {
+            ev.deleted = true;
+            ev.data = null;
+        } else {
+            ev.deleted = false;
+            ev.type = extractType(sv);
+            byte[] d = extractData(sv);
+            if (d != null && d.length <= MAX_VALUE_BYTES && epochValueBytes + d.length <= MAX_EPOCH_VALUE_BYTES) {
+                ev.data = d;
+                epochValueBytes += d.length;   // soft cap: over-counts across overwrites, never under
+            } else {
+                ev.data = null;                // too large / over budget: keep the name + count, drop the value
+            }
+        }
+    }
+
+    /**
+     * Take and reset the current epoch — the distinct variables written since the previous call.
+     * Called by {@link VariableFlushTracker} when a variables.csv save runs (on the watch thread),
+     * so each save can be paired with the variables it compacted. Sorted by write count, then name.
+     */
+    public List<EpochVar> rotateEpoch() {
+        ConcurrentHashMap<String, EpochVar> old = epoch;
+        epoch = new ConcurrentHashMap<>();
+        epochValueBytes = 0;
+        List<EpochVar> list = new ArrayList<>(old.values());
+        list.sort(Comparator.comparingLong((EpochVar v) -> v.writes).reversed().thenComparing(v -> v.name));
+        return list;
     }
 
     // ---------- reflection helpers ----------
@@ -330,6 +434,35 @@ public final class VariableTracker {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /** The latest serialized value bytes of a SerializedVariable (the {@code byte[]} on its Value). */
+    private byte[] extractData(Object sv) {
+        try {
+            Object value = extractValue(sv);
+            if (value == null) return null;
+            if (svDataField == null || !svDataField.getDeclaringClass().isInstance(value)) {
+                svDataField = byteArrayField(value.getClass());
+            }
+            if (svDataField == null) return null;
+            Object d = svDataField.get(value);
+            return d instanceof byte[] b ? b : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** First {@code byte[]}-typed field walking up the hierarchy, made accessible; null if none. */
+    private static Field byteArrayField(Class<?> c) {
+        for (; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (f.getType() == byte[].class) {
+                    f.setAccessible(true);
+                    return f;
+                }
+            }
+        }
+        return null;
     }
 
     private String extractType(Object sv) {
