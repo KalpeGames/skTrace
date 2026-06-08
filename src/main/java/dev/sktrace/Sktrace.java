@@ -32,6 +32,9 @@ public final class Sktrace extends JavaPlugin {
         profiler = new Profiler(this);
         indicator = new ProfilingIndicator(this, profiler);
         getServer().getPluginManager().registerEvents(indicator, this);
+        // Resyncs the profiler's Skript hooks across /sk reload so events don't start firing
+        // twice afterwards. See ReloadHookGuard for the full mechanism.
+        new ReloadHookGuard(this, profiler).register();
 
         var cmd = getCommand("sktrace");
         if (cmd != null) {

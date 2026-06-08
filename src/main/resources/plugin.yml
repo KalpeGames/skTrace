@@ -2,7 +2,7 @@ name: Sktrace
 version: ${project.version}
 main: dev.sktrace.Sktrace
 api-version: '1.20'
-authors: [Billy]
+authors: [KALPE]
 description: Skript-aware profiler. Surfaces which scripts, triggers, and events are eating tick time.
 depend: [Skript]
 softdepend: [spark]

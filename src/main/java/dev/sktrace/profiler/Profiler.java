@@ -88,6 +88,10 @@ public final class Profiler {
 
     private volatile boolean running = false;
     private volatile boolean rolling = false;
+    // True while running but the per-event/trigger/function hooks are temporarily removed
+    // for a Skript reload (see suspendForReload/resumeAfterReload). Tick/MSPT sampling and
+    // variable tracking keep going through the gap; only the swap-based hooks pause.
+    private volatile boolean suspended = false;
     private long startedAtMillis = 0;
     private long stoppedAtMillis = 0;
     // 0 = unbounded (one-shot). >0 = ring buffer size for rolling mode.
@@ -167,17 +171,11 @@ public final class Profiler {
         currentTickNanos.set(0);
         selfOverheadNanos.set(0);
         rolling = false;  // startRolling() flips this back on after we return
+        suspended = false;
         lineLevelTracing = plugin.getConfig().getBoolean("line-level-profiling", false);
         functionProfiling = plugin.getConfig().getBoolean("function-profiling", true);
         variableTracking = plugin.getConfig().getBoolean("variable-tracking", true);
-        installEventHooks();
-        installTriggerHooks();
-        // After trigger hooks (functions aren't in the event registries) and before the
-        // scheduler/structure scan: once we've replaced a ScriptFunction.trigger with a
-        // ProfilingTrigger, the structure scan's "!(v instanceof ProfilingTrigger)" guard
-        // naturally skips it, so functions don't get double-wrapped into triggerStats.
-        if (functionProfiling) installFunctionHooks();
-        installSchedulerHooks();
+        installAllHooks(true);
         // Variable tracking is independent of the trigger/function hooks above: it observes the
         // variable persistence path, not the execution graph. Created here so it's ready before
         // the tick aggregator starts sampling its per-tick write series.
@@ -211,18 +209,83 @@ public final class Profiler {
             try { tickAggregator.cancel(); } catch (Throwable ignored) {}
             tickAggregator = null;
         }
-        uninstallSchedulerHooks();
-        uninstallFunctionHooks();
-        uninstallBodyTracers();
-        uninstallTriggerHooks();
-        uninstallEventHooks();
+        uninstallAllHooks();
         // Stop observing variable writes, but keep the tracker (and its collected stats) so a
         // report written after stop can still read them. It's cleared on the next start().
         if (variableTracker != null) variableTracker.uninstall();
         if (variableFlushTracker != null) variableFlushTracker.uninstall();
         running = false;
         rolling = false;
+        suspended = false;
         stoppedAtMillis = System.currentTimeMillis();
+    }
+
+    /** True while running but the swap-based hooks are paused for a Skript reload. */
+    public boolean isSuspended() { return suspended; }
+
+    /**
+     * Install/uninstall the swap-based hooks as a unit. These are the layers that replace
+     * Skript's Trigger objects (and wrap its Bukkit listeners), so they must be fully
+     * removed before Skript unloads scripts on reload and reinstalled against the new
+     * generation afterwards. Variable tracking is deliberately excluded — it observes the
+     * variable-persistence path, which a reload does not rebuild, so it stays put.
+     */
+    private void installAllHooks(boolean verbose) {
+        installEventHooks();
+        installTriggerHooks(verbose);
+        // After trigger hooks (functions aren't in the event registries) and before the
+        // scheduler/structure scan: once we've replaced a ScriptFunction.trigger with a
+        // ProfilingTrigger, the structure scan's "!(v instanceof ProfilingTrigger)" guard
+        // naturally skips it, so functions don't get double-wrapped into triggerStats.
+        if (functionProfiling) installFunctionHooks();
+        installSchedulerHooks();
+    }
+
+    private void uninstallAllHooks() {
+        uninstallSchedulerHooks();
+        uninstallFunctionHooks();
+        uninstallBodyTracers();
+        uninstallTriggerHooks();
+        uninstallEventHooks();
+    }
+
+    /**
+     * Remove every swap-based hook — restoring Skript's real Triggers and listeners — without
+     * stopping the profiler. Called the instant a {@code /sk reload} is seen, BEFORE Skript
+     * unloads the old scripts. Skript unregisters each trigger from its internal multimap by
+     * identity and only drops the shared Bukkit listener once none remain at that priority; our
+     * wrappers fail that identity check, so without restoring first Skript can't find its own
+     * triggers, the shared listener leaks, the reload registers a second one, and every event
+     * fires twice. Restoring first makes Skript's identity-based cleanup succeed. Idempotent;
+     * no-op when not running or already suspended.
+     */
+    public synchronized void suspendForReload() {
+        if (!running || suspended) return;
+        uninstallAllHooks();
+        suspended = true;
+    }
+
+    /**
+     * Reinstall the swap-based hooks against the freshly loaded generation. The old generation's
+     * per-trigger/function/line stats reference Triggers that no longer exist, so they're cleared
+     * before re-hooking (event-class stats and the tick/MSPT series are generation-independent and
+     * kept). The swap bookkeeping was already emptied by {@link #suspendForReload()}, so this never
+     * replays stale list/set positions against the new map. Idempotent; no-op unless suspended.
+     */
+    public synchronized void resumeAfterReload() {
+        if (!running || !suspended) return;
+        triggerStats.clear();
+        functionStats.clear();
+        itemStats.clear();
+        bodyTracedTriggers.clear();
+        bodyRewires.clear();
+        installAllHooks(false);
+        // Source text was only needed for line matching during install; drop it so the rolling
+        // buffer doesn't retain every script's text (mirrors startInternal).
+        scriptSourceCache.clear();
+        suspended = false;
+        plugin.getLogger().info("[Sktrace] Re-synced profiler hooks after Skript reload ("
+                + triggerSwaps.size() + " triggers, " + functionSwaps.size() + " functions).");
     }
 
     private void sampleTick() {
@@ -448,10 +511,10 @@ public final class Profiler {
     // ---------- Trigger-level hooks (Skript reflection) ----------
 
     @SuppressWarnings("unchecked")
-    private void installTriggerHooks() {
+    private void installTriggerHooks(boolean verbose) {
         try {
             Class<?> handlerClass = Class.forName("ch.njol.skript.SkriptEventHandler");
-            plugin.getLogger().info("[Sktrace] Scanning ch.njol.skript.SkriptEventHandler for trigger registries...");
+            if (verbose) plugin.getLogger().info("[Sktrace] Scanning ch.njol.skript.SkriptEventHandler for trigger registries...");
 
             int hookedBefore = triggerSwaps.size();
             for (Field f : handlerClass.getDeclaredFields()) {
@@ -461,19 +524,21 @@ public final class Profiler {
                     f.setAccessible(true);
                     value = f.get(null);
                 } catch (Throwable t) {
-                    plugin.getLogger().info("[Sktrace]   " + f.getName() + ": (inaccessible)");
+                    if (verbose) plugin.getLogger().info("[Sktrace]   " + f.getName() + ": (inaccessible)");
                     continue;
                 }
-                String summary = describeValue(value);
-                plugin.getLogger().info("[Sktrace]   " + f.getName() + " : "
-                        + f.getType().getSimpleName() + " = " + summary);
+                if (verbose) {
+                    String summary = describeValue(value);
+                    plugin.getLogger().info("[Sktrace]   " + f.getName() + " : "
+                            + f.getType().getSimpleName() + " = " + summary);
+                }
                 if (value == null) continue;
                 int n = tryHookContainer(value, "SkriptEventHandler." + f.getName());
-                if (n > 0) plugin.getLogger().info("[Sktrace]     -> hooked " + n + " triggers here");
+                if (n > 0 && verbose) plugin.getLogger().info("[Sktrace]     -> hooked " + n + " triggers here");
             }
 
             int hooked = triggerSwaps.size() - hookedBefore;
-            plugin.getLogger().info("[Sktrace] Total triggers hooked: " + hooked);
+            if (verbose) plugin.getLogger().info("[Sktrace] Total triggers hooked: " + hooked);
 
             if (hooked == 0) {
                 triggerHooksAvailable = false;
@@ -752,7 +817,7 @@ public final class Profiler {
 
     private TriggerStats buildStats(String id, Trigger original) {
         String script = "unknown";
-        String name = triggerDisplayName(original);
+        String name = bestLabel(original);
         int line = -1;
         try {
             Object scriptObj = readFieldByType(original, "org.skriptlang.skript.lang.script.Script");
@@ -765,10 +830,68 @@ public final class Profiler {
     private String describe(Trigger t) {
         try {
             Object script = readFieldByType(t, "org.skriptlang.skript.lang.script.Script");
-            return scriptDisplayName(script) + "#" + triggerDisplayName(t);
+            return scriptDisplayName(script) + "#" + bestLabel(t);
         } catch (Throwable e) {
             return "trigger@" + System.identityHashCode(t);
         }
+    }
+
+    /**
+     * Best human label for a trigger. Normally this is {@link #triggerDisplayName} (the event's
+     * own toString plus any parsed identifiers). But Skript's {@code SimpleEvent} — used by
+     * placeholder events (skript-placeholders), SkBee custom events, and many addons — has a
+     * hardcoded {@code toString()} of "simple event" with no identifier, so every such trigger
+     * would show (and collide) as "simple event". For those, fall back to the actual line the user
+     * wrote: the script's source line at the trigger's header, then Skript's own debug label.
+     */
+    private String bestLabel(Trigger t) {
+        String base = triggerDisplayName(t);
+        if (!isGenericLabel(base)) return base;
+        String src = sourceLineLabel(t);   // the literal line the user wrote — cleanest and unique
+        if (src != null) return src;
+        try {
+            String dbg = t.getDebugLabel();
+            if (!isGenericLabel(dbg)) return cleanEventLine(dbg);
+        } catch (Throwable ignored) { }
+        return base;
+    }
+
+    /** Uninformative trigger labels we should try to replace with the real source line. */
+    private static boolean isGenericLabel(String s) {
+        if (s == null) return true;
+        String x = s.trim();
+        return x.isEmpty() || x.equalsIgnoreCase("simple event") || x.equalsIgnoreCase("trigger");
+    }
+
+    /** The script's source line at the trigger's header, cleaned for display, or null if unavailable. */
+    private String sourceLineLabel(Trigger t) {
+        try {
+            int line = triggerLine(t);
+            if (line <= 0) return null;
+            Object scriptObj = readFieldByType(t, "org.skriptlang.skript.lang.script.Script");
+            List<String> lines = loadScriptLines(scriptDisplayName(scriptObj));
+            if (line - 1 < 0 || line - 1 >= lines.size()) return null;
+            String label = cleanEventLine(lines.get(line - 1));
+            if (label == null) return null;
+            return label.length() > 80 ? label.substring(0, 80) + "..." : label;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** Trim a raw script line into a readable event label: drop an inline comment and trailing colon. */
+    private static String cleanEventLine(String raw) {
+        if (raw == null) return null;
+        boolean inStr = false;
+        int hash = -1;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '"') inStr = !inStr;
+            else if (c == '#' && !inStr) { hash = i; break; }
+        }
+        String s = (hash >= 0 ? raw.substring(0, hash) : raw).trim();
+        while (s.endsWith(":")) s = s.substring(0, s.length() - 1).trim();
+        return s.isEmpty() ? null : s;
     }
 
     /**
