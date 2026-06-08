@@ -9,6 +9,14 @@
 # plugins/bStats/config.yml. Set to false to turn Sktrace's metrics off.
 metrics: true
 
+# Update checker (on by default).
+#
+# On startup, and every few hours after, skTrace asks the Modrinth API whether a newer
+# release is out. If so, operators (and anyone with sktrace.use) get a short clickable
+# notice when they join, and it's logged once to the console. This is a NOTIFICATION
+# only — skTrace never downloads or installs anything. Set to false to turn it off.
+update-checker: true
+
 # Endpoint that /sktrace report uploads to. Reports are POSTed as text/html;
 # the server returns a JSON {"code","url"} pair and players get a clickable link.
 #

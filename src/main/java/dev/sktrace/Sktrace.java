@@ -45,6 +45,10 @@ public final class Sktrace extends JavaPlugin {
 
         setupMetrics();
 
+        // Tells operators (and the console) when a newer release is on Modrinth. Notification only;
+        // it never downloads anything. Disable with update-checker: false in config.yml.
+        new UpdateChecker(this).start();
+
         if (getConfig().getBoolean("rolling.enabled", false)) {
             // Defer one tick so we start AFTER Skript finishes its own enable (script
             // load is async on some servers); otherwise we miss triggers that haven't
