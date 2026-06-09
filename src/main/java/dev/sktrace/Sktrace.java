@@ -16,6 +16,7 @@ public final class Sktrace extends JavaPlugin {
 
     private Profiler profiler;
     private ProfilingIndicator indicator;
+    private ReloadHookGuard reloadGuard;
 
     @Override
     public void onEnable() {
@@ -32,9 +33,10 @@ public final class Sktrace extends JavaPlugin {
         profiler = new Profiler(this);
         indicator = new ProfilingIndicator(this, profiler);
         getServer().getPluginManager().registerEvents(indicator, this);
-        // Resyncs the profiler's Skript hooks across /sk reload so events don't start firing
+        // Resyncs the profiler's Skript hooks across script reloads so events don't start firing
         // twice afterwards. See ReloadHookGuard for the full mechanism.
-        new ReloadHookGuard(this, profiler).register();
+        reloadGuard = new ReloadHookGuard(this, profiler);
+        reloadGuard.register();
 
         var cmd = getCommand("sktrace");
         if (cmd != null) {
@@ -113,6 +115,9 @@ public final class Sktrace extends JavaPlugin {
     @Override
     public void onDisable() {
         if (indicator != null) indicator.stop();
+        // Drop the loader-event proxies first so Skript's registry doesn't keep a reference to
+        // this (possibly about-to-be-discarded) classloader across a plugin-manager reload.
+        if (reloadGuard != null) reloadGuard.unregister();
         if (profiler != null && profiler.isRunning()) profiler.stop();
     }
 

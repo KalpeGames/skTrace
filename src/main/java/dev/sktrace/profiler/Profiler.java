@@ -59,6 +59,10 @@ public final class Profiler {
     // Triggers whose bodies we've already injected tracers into. Avoids double-wrapping
     // when the same Trigger is reached via multiple Skript registries.
     private final Set<Trigger> bodyTracedTriggers = Collections.newSetFromMap(new IdentityHashMap<>());
+    // One wrapper per original Trigger, no matter how many containers reference it (the event
+    // multimap and the script-structure scan both reach the same Trigger objects). Reusing the
+    // wrapper keeps identities consistent across containers and avoids duplicate stats churn.
+    private final Map<Trigger, ProfilingTrigger> wrapperCache = new IdentityHashMap<>();
     private final List<BodyRewire> bodyRewires = new ArrayList<>();
     // Per-line body tracing rewrites Skript's internal trigger graph and is the
     // only layer that can perturb a running script, so it's opt-in. Read from
@@ -154,6 +158,7 @@ public final class Profiler {
         functionStats.clear();
         itemStats.clear();
         bodyTracedTriggers.clear();
+        wrapperCache.clear();
         bodyRewires.clear();
         listenerSwaps.clear();
         triggerSwaps.clear();
@@ -278,6 +283,7 @@ public final class Profiler {
         functionStats.clear();
         itemStats.clear();
         bodyTracedTriggers.clear();
+        wrapperCache.clear();
         bodyRewires.clear();
         installAllHooks(false);
         // Source text was only needed for line matching during install; drop it so the rolling
@@ -499,6 +505,14 @@ public final class Profiler {
     private void uninstallEventHooks() {
         for (ListenerSwap swap : listenerSwaps) {
             try {
+                // Only swap back if our wrapped listener is still registered. If Skript already
+                // unregistered it (its own unregister matches on the Listener object, which the
+                // wrapper shares), re-registering the original would add a duplicate handler.
+                boolean present = false;
+                for (RegisteredListener rl : swap.handlerList.getRegisteredListeners()) {
+                    if (rl == swap.wrapped) { present = true; break; }
+                }
+                if (!present) continue;
                 swap.handlerList.unregister(swap.wrapped);
                 swap.handlerList.register(swap.original);
             } catch (Throwable t) {
@@ -603,26 +617,27 @@ public final class Profiler {
         return 0;
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     private int hookTriggerSet(Set<Object> set, String path) {
         // Snapshot, find wrappable triggers, remove originals and add wrappers.
         List<Object> snapshot = new ArrayList<>(set);
         int hooked = 0;
         for (Object entry : snapshot) {
             Trigger original = unwrapTrigger(entry);
-            if (original == null) continue;
+            if (original == null || original instanceof ProfilingTrigger) continue;
             try {
                 ProfilingTrigger replacement = wrapTrigger(original);
                 if (replacement == null) continue;
-                Object newEntry = rewrap(entry, original, replacement);
-                triggerStats.put(replacement.id(), buildStats(replacement.id(), original));
-                if (newEntry != entry) {
+                triggerStats.putIfAbsent(replacement.id(), buildStats(replacement.id(), original));
+                if (entry == original) {
                     set.remove(entry);
-                    set.add(newEntry);
-                    triggerSwaps.add(new TriggerSwap(null, -1, entry, set, newEntry));
+                    set.add(replacement);
+                    triggerSwaps.add(new TriggerSwap(null, set, null, null, entry, replacement));
                 } else {
-                    // Container was mutated in-place; nothing to swap in the set
-                    triggerSwaps.add(new TriggerSwap(null, -1, null, set, null));
+                    // Container entry holds the Trigger in a field — swap the field in place.
+                    Field f = findTriggerField(entry);
+                    if (f == null) continue;
+                    f.set(entry, replacement);
+                    triggerSwaps.add(new TriggerSwap(null, null, f, entry, original, replacement));
                 }
                 hooked++;
             } catch (Throwable t) {
@@ -722,19 +737,25 @@ public final class Profiler {
         }
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     private void hookTriggerList(List<Object> list, Object containerKey) {
         for (int i = 0; i < list.size(); i++) {
             Object entry = list.get(i);
             Trigger original = unwrapTrigger(entry);
-            if (original == null) continue;
+            if (original == null || original instanceof ProfilingTrigger) continue;
             try {
                 ProfilingTrigger replacement = wrapTrigger(original);
                 if (replacement == null) continue;
-                Object newEntry = rewrap(entry, original, replacement);
-                triggerStats.put(replacement.id(), buildStats(replacement.id(), original));
-                ((List) list).set(i, newEntry);
-                triggerSwaps.add(new TriggerSwap(list, i, entry));
+                triggerStats.putIfAbsent(replacement.id(), buildStats(replacement.id(), original));
+                if (entry == original) {
+                    list.set(i, replacement);
+                    triggerSwaps.add(new TriggerSwap(list, null, null, null, entry, replacement));
+                } else {
+                    // Container entry holds the Trigger in a field — swap the field in place.
+                    Field f = findTriggerField(entry);
+                    if (f == null) continue;
+                    f.set(entry, replacement);
+                    triggerSwaps.add(new TriggerSwap(null, null, f, entry, original, replacement));
+                }
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.FINE,
                         "Could not wrap trigger #" + i + " (" + describe(original) + "): " + t.getMessage());
@@ -764,29 +785,24 @@ public final class Profiler {
         return null;
     }
 
-    /**
-     * If the container held the trigger via a field, rebuild a container with the new trigger.
-     * For bare-Trigger lists we just return the replacement directly.
-     */
-    private Object rewrap(Object originalEntry, Trigger original, ProfilingTrigger replacement)
-            throws ReflectiveOperationException {
-        if (originalEntry == original) return replacement;
-        // Replace the Trigger field inside the container in-place.
-        Class<?> c = originalEntry.getClass();
+    /** The first Trigger-typed field on a container entry (walking up the hierarchy), or null. */
+    private static Field findTriggerField(Object entry) {
+        Class<?> c = entry.getClass();
         while (c != null && c != Object.class) {
             for (Field f : c.getDeclaredFields()) {
                 if (Trigger.class.isAssignableFrom(f.getType())) {
                     f.setAccessible(true);
-                    f.set(originalEntry, replacement);
-                    return originalEntry;
+                    return f;
                 }
             }
             c = c.getSuperclass();
         }
-        throw new NoSuchFieldException("No Trigger field on " + originalEntry.getClass());
+        return null;
     }
 
     private ProfilingTrigger wrapTrigger(Trigger t) throws ReflectiveOperationException {
+        ProfilingTrigger cached = wrapperCache.get(t);
+        if (cached != null) return cached;
         // Modern Skript stores the trigger body as a linked list (first/last + next),
         // not a List<TriggerItem>. We don't reconstruct it - ProfilingTrigger is a thin
         // wrapper that delegates execute() back to the original.
@@ -812,6 +828,7 @@ public final class Profiler {
         if (lineLevelTracing) {
             installBodyTracers(t, id);
         }
+        wrapperCache.put(t, wrapper);
         return wrapper;
     }
 
@@ -1617,9 +1634,9 @@ public final class Profiler {
                             ProfilingTrigger wrapper = wrapTrigger(original);
                             if (wrapper != null) {
                                 String id = wrapper.id();
-                                triggerStats.put(id, buildStats(id, original));
+                                triggerStats.putIfAbsent(id, buildStats(id, original));
                                 f.set(container, wrapper);
-                                schedulerSwaps.add(new SchedulerSwap(f, container, original));
+                                schedulerSwaps.add(new SchedulerSwap(f, container, original, wrapper));
                             }
                         } catch (Throwable t) {
                             plugin.getLogger().log(Level.FINE,
@@ -1665,40 +1682,14 @@ public final class Profiler {
         return null;
     }
 
-    private int swapTriggerFieldsIn(Object runnable) {
-        int count = 0;
-        Class<?> c = runnable.getClass();
-        while (c != null && c != Object.class) {
-            for (Field f : c.getDeclaredFields()) {
-                if (Modifier.isStatic(f.getModifiers())) continue;
-                if (!Trigger.class.isAssignableFrom(f.getType())) continue;
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(runnable);
-                    if (!(v instanceof Trigger original)) continue;
-                    if (original instanceof ProfilingTrigger) continue;
-                    ProfilingTrigger wrapper = wrapTrigger(original);
-                    if (wrapper == null) continue;
-                    String id = wrapper.id();
-                    triggerStats.put(id, buildStats(id, original));
-                    f.set(runnable, wrapper);
-                    schedulerSwaps.add(new SchedulerSwap(f, runnable, original));
-                    count++;
-                } catch (Throwable t) {
-                    plugin.getLogger().log(Level.FINE,
-                            "[Sktrace] Failed to swap trigger field: " + t.getMessage());
-                }
-            }
-            c = c.getSuperclass();
-        }
-        return count;
-    }
-
     private void uninstallSchedulerHooks() {
         for (int i = schedulerSwaps.size() - 1; i >= 0; i--) {
             SchedulerSwap swap = schedulerSwaps.get(i);
             try {
-                swap.field.set(swap.holder, swap.original);
+                // Only restore if the field still holds our wrapper (see uninstallTriggerHooks).
+                if (swap.field.get(swap.holder) == swap.wrapper) {
+                    swap.field.set(swap.holder, swap.original);
+                }
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING,
                         "Failed to restore scheduler-task trigger: " + t.getMessage(), t);
@@ -1800,7 +1791,7 @@ public final class Profiler {
         // Per-line tracing inside the function body, gated by the same opt-in as triggers.
         if (lineLevelTracing) installBodyTracers(original, id);
         trigField.set(fn, wrapper);
-        functionSwaps.add(new SchedulerSwap(trigField, fn, original));
+        functionSwaps.add(new SchedulerSwap(trigField, fn, original, wrapper));
         return true;
     }
 
@@ -1824,7 +1815,10 @@ public final class Profiler {
         for (int i = functionSwaps.size() - 1; i >= 0; i--) {
             SchedulerSwap swap = functionSwaps.get(i);
             try {
-                swap.field.set(swap.holder, swap.original);
+                // Only restore if the field still holds our wrapper (see uninstallTriggerHooks).
+                if (swap.field.get(swap.holder) == swap.wrapper) {
+                    swap.field.set(swap.holder, swap.original);
+                }
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING,
                         "[Sktrace] Failed to restore function trigger: " + t.getMessage(), t);
@@ -1833,16 +1827,31 @@ public final class Profiler {
         functionSwaps.clear();
     }
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
+    /**
+     * Identity-guarded restore: put each original back ONLY where our wrapper still sits. A
+     * container that no longer holds the wrapper was rebuilt or pruned by Skript (a reload we
+     * didn't intercept) — re-inserting the original there would resurrect a trigger Skript has
+     * already dropped, leaving an orphan that double-fires until a full server restart.
+     */
     private void uninstallTriggerHooks() {
         for (int i = triggerSwaps.size() - 1; i >= 0; i--) {
             TriggerSwap swap = triggerSwaps.get(i);
             try {
-                if (swap.list != null && swap.index >= 0) {
-                    ((List) swap.list).set(swap.index, swap.originalEntry);
+                if (swap.list != null) {
+                    List<Object> list = swap.list;
+                    for (int idx = list.size() - 1; idx >= 0; idx--) {
+                        if (list.get(idx) == swap.wrapper) {
+                            list.set(idx, swap.original);
+                            break;
+                        }
+                    }
                 } else if (swap.set != null) {
-                    if (swap.replacement != null) swap.set.remove(swap.replacement);
-                    if (swap.originalEntry != null) swap.set.add(swap.originalEntry);
+                    // Trigger doesn't override equals, so remove() is an identity test here.
+                    if (swap.set.remove(swap.wrapper)) swap.set.add(swap.original);
+                } else if (swap.field != null) {
+                    if (swap.field.get(swap.holder) == swap.wrapper) {
+                        swap.field.set(swap.holder, swap.original);
+                    }
                 }
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING, "Failed to restore trigger: " + t.getMessage(), t);
@@ -1923,8 +1932,15 @@ public final class Profiler {
     // ---------- Bookkeeping records ----------
 
     private record ListenerSwap(HandlerList handlerList, RegisteredListener original, RegisteredListener wrapped) {}
-    private record TriggerSwap(List<?> list, int index, Object originalEntry, Set<Object> set, Object replacement) {
-        TriggerSwap(List<?> list, int index, Object originalEntry) { this(list, index, originalEntry, null, null); }
-    }
-    private record SchedulerSwap(Field field, Object holder, Trigger original) {}
+
+    // One reversible container edit, in exactly one of three shapes: a list slot, a set member,
+    // or a Trigger-typed field inside a holder object. Restores are identity-guarded — each
+    // checks that OUR wrapper is still where we put it and silently skips otherwise. If a reload
+    // slipped past the ReloadHookGuard, Skript has already rebuilt or mutated these containers;
+    // blindly writing originals back (the old index-based restore) resurrected triggers Skript
+    // had dropped from its bookkeeping, and those orphans double-fired every event until a full
+    // server restart, surviving /sktrace stop and even plugin upgrades.
+    private record TriggerSwap(List<Object> list, Set<Object> set, Field field, Object holder,
+                               Object original, Object wrapper) {}
+    private record SchedulerSwap(Field field, Object holder, Trigger original, Trigger wrapper) {}
 }
