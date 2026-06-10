@@ -187,6 +187,9 @@ public final class ReportWriter {
         // re-rendered by the share worker) is built entirely from this JSON plus a
         // static, trusted template — no server-rendered, user-influenced HTML.
         sb.append(",\"generatedAt\":\"").append(jsonEscape(generatedAt)).append("\"");
+        // Running plugin version, so the share worker can flag a report whose plugin is behind the
+        // latest Modrinth release (exact-version check), instead of inferring "old" from data shape.
+        sb.append(",\"pluginVersion\":\"").append(jsonEscape(plugin.getDescription().getVersion())).append("\"");
         sb.append(",\"hooksOk\":").append(profiler.triggerHooksAvailable());
         sb.append(",\"hookReason\":\"").append(jsonEscape(profiler.triggerHookFailureReason())).append("\"");
         sb.append(",\"totalTriggers\":").append(totalTriggers);
