@@ -1503,6 +1503,46 @@
   }
 
   // ===========================================================
+  // LOOPS — loop/while sections seen running during the window.
+  // Stays hidden when nothing was observed (or watching is off).
+  // ===========================================================
+  function renderLoops(){
+    var L = data.loops || {};
+    var section = document.getElementById('loops-section');
+    if (!section) return;
+    var items = (L.ok && L.items) ? L.items : [];
+    if (items.length === 0) return;   // section stays hidden
+    section.hidden = false;
+    var tbody = document.getElementById('loops-tbody');
+    if (!tbody) return;
+    var maxIter = 0;
+    for (var i = 0; i < items.length; i++){
+      if ((items[i].peakIter || 0) > maxIter) maxIter = items[i].peakIter;
+    }
+    var html = '';
+    for (var i = 0; i < items.length; i++){
+      var r = items[i];
+      var pct = maxIter > 0 ? (100 * (r.peakIter || 0) / maxIter).toFixed(1) : 0;
+      var loc = r.line > 0 ? esc(r.script) + ':' + r.line : esc(r.script);
+      var status = r.running
+        ? '<span class="loop-run">running</span> <span class="dim">#' + fmtInt(r.currentIter || 0)
+            + (r.itersPerSec > 0 ? ' · ↑' + fmtInt(r.itersPerSec) + '/s' : '') + '</span>'
+        : '<span class="dim">finished</span>';
+      html += '<tr>'
+        + '<td class="heat-cell"><div class="heat-track"><div class="heat-bar' + (r.running ? '' : ' dim') + '" style="width:' + pct + '%"></div></div></td>'
+        + '<td class="loop-loc">' + loc + '</td>'
+        + '<td><span class="var-name">' + esc(r.name) + '</span></td>'
+        + '<td class="dim">' + (r.isWhile ? 'while' : 'loop') + '</td>'
+        + '<td class="num">' + fmtInt(r.peakIter || 0) + '</td>'
+        + '<td class="num dim">' + fmtInt(r.peakConcurrent || 0) + '</td>'
+        + '<td>' + status + '</td>'
+        + '</tr>';
+    }
+    tbody.innerHTML = html;
+    applyRowLimit('loops', tbody);
+  }
+
+  // ===========================================================
   // VARIABLES — global variable writes observed during the
   // window (the variables.csv / database ones). Stays hidden
   // when tracking is off or unavailable on this Skript version.
@@ -1664,6 +1704,7 @@
     requestAnimationFrame(function(){
       renderTriggersTable();
       renderFunctionsTable();
+      renderLoops();
       renderVariables();
     });
   });

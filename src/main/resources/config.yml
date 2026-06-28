@@ -76,6 +76,41 @@ line-level-profiling: false
 # times per window) and want to drop even that small per-call overhead.
 function-profiling: true
 
+# Loop watching (on by default).
+#
+# Powers /sktrace loops — a live view of which loop/while sections are currently
+# running, their iteration count, how fast they're climbing, and how long they've
+# been going. Use it to spot a loop that "just keeps running" without spamming
+# broadcasts.
+#
+# This is passive: it only READS the iteration counter Skript already keeps for
+# every loop. It never rewrites the trigger graph, so (unlike line-level-profiling)
+# it cannot disturb a running script. Loops are collected when profiling starts.
+#
+# Note: only loops that span ticks — i.e. contain a wait/delay — can be observed.
+# A no-delay loop finishes within one tick (nothing to see), and a truly infinite
+# no-delay loop freezes the server so nothing, including this view, can run.
+#
+# Turn off to skip the (startup-only) trigger-body scan that finds loops.
+loop-watching: true
+
+# Frozen-loop detection (on by default; requires loop-watching).
+#
+# The loops view above can only show loops that yield between ticks. A truly INFINITE
+# no-delay loop (e.g. "while true:" with no wait inside) instead pins the server's main
+# thread, so the server freezes and nothing in-game — not even /sktrace loops — can run.
+#
+# This watchdog catches that. It runs on its own background thread (independent of the
+# frozen main thread) and, if the server stops ticking for loop-hang-seconds, logs which
+# loop is the runaway (script:line) to the CONSOLE — the only place that still works
+# during a freeze. It is detection only: it never stops or kills anything.
+#
+# loop-hang-seconds is how long the main thread must be unresponsive before it's treated
+# as frozen. Keep it well above your worst normal lag spike (10s is very safe) to avoid
+# false alarms from heavy single ticks, world saves, or GC pauses.
+loop-hang-detection: true
+loop-hang-seconds: 10
+
 # Variable tracking (on by default).
 #
 # Records how many GLOBAL variables are written during a capture and which were

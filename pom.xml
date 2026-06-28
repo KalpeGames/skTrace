@@ -6,7 +6,7 @@
 
     <groupId>dev.sktrace</groupId>
     <artifactId>Sktrace</artifactId>
-    <version>0.1.4</version>
+    <version>0.1.5</version>
     <packaging>jar</packaging>
 
     <licenses>

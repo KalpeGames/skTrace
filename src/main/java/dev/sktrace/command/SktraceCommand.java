@@ -5,6 +5,7 @@ package dev.sktrace.command;
 import dev.sktrace.ProfilingIndicator;
 import dev.sktrace.Sktrace;
 import dev.sktrace.profiler.EventStats;
+import dev.sktrace.profiler.LoopWatcher;
 import dev.sktrace.profiler.Profiler;
 import dev.sktrace.profiler.TriggerStats;
 import dev.sktrace.report.ReportUploader;
@@ -42,7 +43,7 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
     private static final TextColor OK = TextColor.color(0x7ee787);
 
     private static final List<String> SUBCOMMANDS =
-            List.of("start", "stop", "status", "report", "clip", "rolling", "reset", "diag");
+            List.of("start", "stop", "status", "loops", "report", "clip", "rolling", "reset", "diag");
     private static final List<String> STATUS_HINTS = List.of("5", "10", "20", "50");
     private static final List<String> REPORT_HINTS = List.of("--include-files", "--no-upload", "--show-secrets", "--variable-values");
     private static final List<String> ROLLING_HINTS = List.of("on", "off");
@@ -68,6 +69,7 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
             case "start"   -> doStart(sender);
             case "stop"    -> doStop(sender);
             case "status"  -> doStatus(sender, parseTopN(args, 5));
+            case "loops"   -> doLoops(sender);
             case "report"  -> doReport(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), false, !hasFlag(args, "--show-secrets"), hasFlag(args, "--variable-values"));
             case "clip"    -> doClip(sender, hasFlag(args, "--include-files"), !hasFlag(args, "--no-upload"), !hasFlag(args, "--show-secrets"), hasFlag(args, "--variable-values"));
             case "rolling" -> doRolling(sender, args.length >= 2 ? args[1] : null);
@@ -512,6 +514,107 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
     }
 
     // ============================================================
+    // Loops — live view of running loop/while sections
+    // ============================================================
+
+    private void doLoops(CommandSender s) {
+        if (!profiler.loopWatchingEnabled()) {
+            s.sendMessage(glyphLine("•", WARN,
+                    Component.text("Loop watching is disabled.", MUTED)
+                            .append(Component.text("  Set ", DIM))
+                            .append(Component.text("loop-watching: true", MUTED))
+                            .append(Component.text(" in config.yml.", DIM))));
+            return;
+        }
+        if (!profiler.loopWatchingAvailable()) {
+            s.sendMessage(glyphLine("•", WARN,
+                    Component.text("Loop watching isn't supported on this Skript build.", MUTED)
+                            .append(Component.text("  The loop iteration counter couldn't be read.", DIM))));
+            return;
+        }
+        if (profiler.trackedLoopCount() == 0) {
+            if (!profiler.isRunning()) {
+                s.sendMessage(glyphLine("•", WARN,
+                        Component.text("No loop data yet.", MUTED)
+                                .append(Component.text("  Loops are collected when profiling starts — run ", DIM))
+                                .append(clickable("/sktrace start", "Start profiling"))
+                                .append(Component.text(".", DIM))));
+            } else {
+                s.sendMessage(glyphLine("•", DIM, Component.text("No loops found in any loaded script.", MUTED)));
+            }
+            return;
+        }
+
+        List<LoopWatcher.Reading> loops = profiler.loopSnapshot();
+
+        s.sendMessage(Component.empty());
+        s.sendMessage(sectionHead("Running loops", profiler.trackedLoopCount() + " watched"));
+        if (loops.isEmpty()) {
+            s.sendMessage(line(Component.text("  No loops are running right now.", OK)));
+            s.sendMessage(line(Component.text("  Only loops that span ticks (contain a wait) can be seen here.", DIM, TextDecoration.ITALIC)));
+            return;
+        }
+        int rank = 1;
+        for (LoopWatcher.Reading r : loops) {
+            s.sendMessage(loopRow(rank++, r));
+        }
+        s.sendMessage(Component.empty());
+        s.sendMessage(line(Component.text("  A counter that keeps climbing (", DIM)
+                .append(Component.text("↑", WARN))
+                .append(Component.text(") and never clears is a runaway loop.", DIM))));
+        if (profiler.hangDetectionEnabled()) {
+            s.sendMessage(line(Component.text("  A frozen no-delay loop is watched for separately — it'd be logged to the console.", DIM)));
+        }
+    }
+
+    // One compact row per running loop: name · #iteration [· ↑rate] · age [· ×concurrent].
+    // Location and full numbers live in the hover. Color escalates with how "runaway" it looks.
+    private static Component loopRow(int rank, LoopWatcher.Reading r) {
+        boolean climbing = r.itersPerSec > 0;
+        // A loop still climbing after a minute, or already deep into the millions, is the
+        // shape of a runaway — flag it red. Climbing but young/shallow is amber. Idle is neutral.
+        TextColor iterColor = (climbing && (r.currentIter >= 100_000 || r.ageMillis >= 60_000)) ? CRIT
+                : climbing ? WARN : MUTED;
+        String loc = r.script + (r.line > 0 ? ":" + r.line : "");
+        long rate = Math.round(r.itersPerSec);
+
+        Component hover = line(Component.empty()
+                .append(Component.text(r.label, TEXT, TextDecoration.BOLD))
+                .append(Component.text("\n" + loc, ACCENT_DIM))
+                .append(Component.text("\n\niteration   ", DIM)).append(Component.text(String.format("%,d", r.currentIter), TEXT))
+                .append(Component.text("\nrate        ", DIM)).append(Component.text(climbing ? String.format("%,d", rate) + " / sec" : "not climbing (sampling…)", climbing ? TEXT : MUTED))
+                .append(Component.text("\nrunning for ", DIM)).append(Component.text(fmtAge(r.ageMillis), TEXT))
+                .append(r.concurrent > 1
+                        ? Component.text("\nconcurrent  ", DIM).append(Component.text(r.concurrent + " executions", TEXT))
+                        : Component.empty()));
+
+        Component row = Component.text(String.format(" %2d ", rank), DIM)
+                .append(Component.text(truncate(r.label, 26), TEXT))
+                .append(sep())
+                .append(Component.text("#" + abbrevCount(r.currentIter), iterColor))
+                .append(climbing
+                        ? Component.text("  ↑", WARN).append(Component.text(abbrevCount(rate) + "/s", WARN))
+                        : Component.empty())
+                .append(sep())
+                .append(Component.text(fmtAge(r.ageMillis), DIM))
+                .append(r.concurrent > 1 ? Component.text("  ×" + r.concurrent, ACCENT_DIM) : Component.empty());
+        return line(row).hoverEvent(HoverEvent.showText(hover));
+    }
+
+    /** Compact elapsed time: 12s / 3m 4s / 1h 12m. "—" when unknown. */
+    private static String fmtAge(long ms) {
+        if (ms <= 0) return "—";
+        long sec = ms / 1000;
+        if (sec < 60) return sec + "s";
+        long min = sec / 60;
+        sec %= 60;
+        if (min < 60) return min + "m " + sec + "s";
+        long hr = min / 60;
+        min %= 60;
+        return hr + "h " + min + "m";
+    }
+
+    // ============================================================
     // Help
     // ============================================================
 
@@ -523,6 +626,10 @@ public final class SktraceCommand implements CommandExecutor, TabCompleter {
         helpRow(s, "start",          "Begin profiling");
         helpRow(s, "stop",           "Stop profiling");
         helpRow(s, "status [N]",     "Summary + hot triggers");
+        helpRow(s, "loops",          "Live view of running loops",
+                "Shows which loop/while sections are running right now,\n"
+                + "their iteration count, climb rate, and how long they've run.\n"
+                + "Only loops that span ticks (contain a wait) are visible.");
         helpRow(s, "report",         "Write & upload a report",
                 "Writes an HTML dashboard, then uploads it.\n"
                 + "--include-files  embed script source\n"

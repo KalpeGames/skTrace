@@ -80,6 +80,23 @@ public final class Profiler {
     // stop() so the report can read the collected stats; null when disabled/unavailable.
     private boolean variableTracking;
     private VariableTracker variableTracker;
+    // Live observer of running loops (loop/while). Passive: it only reads each LoopSection's
+    // iteration counter, never the trigger graph, so it's on by default (config loop-watching).
+    // Populated during hook install by walking each trigger body; sampled by the tick task.
+    private boolean loopWatching;
+    private final LoopWatcher loopWatcher = new LoopWatcher();
+    // Throttle for loop sampling: the tick task runs every tick, but loop counters only need a
+    // coarse rate, so we sample them once every LOOP_SAMPLE_TICKS ticks (~1s) to keep cost trivial.
+    private int loopSampleCounter;
+    private static final int LOOP_SAMPLE_TICKS = 20;
+    // Per-tick heartbeat (System.nanoTime of the last sampleTick), read off-thread by the hang
+    // watchdog to tell whether the main thread is still ticking. Volatile: written on the main
+    // thread, read on the watchdog thread. 0 until the first tick after start.
+    private volatile long mainHeartbeatNanos;
+    // Async detector for a frozen main thread (an infinite no-delay loop). Daemon-threaded so it
+    // keeps running while the server is hung; created per start when enabled, null otherwise.
+    private boolean hangDetection;
+    private HangWatchdog hangWatchdog;
     // Companion to variableTracker: watches variables.csv for Skript's periodic full rewrite
     // (the 5-minute saveTask). Passive (a filesystem WatchService, never touches Skript), gated by
     // the same variable-tracking config, and only active for flat-file storage. Kept after stop()
@@ -180,6 +197,11 @@ public final class Profiler {
         lineLevelTracing = plugin.getConfig().getBoolean("line-level-profiling", false);
         functionProfiling = plugin.getConfig().getBoolean("function-profiling", true);
         variableTracking = plugin.getConfig().getBoolean("variable-tracking", true);
+        loopWatching = plugin.getConfig().getBoolean("loop-watching", true);
+        hangDetection = loopWatching && plugin.getConfig().getBoolean("loop-hang-detection", true);
+        loopWatcher.clear();
+        loopSampleCounter = 0;
+        mainHeartbeatNanos = 0;
         installAllHooks(true);
         // Variable tracking is independent of the trigger/function hooks above: it observes the
         // variable persistence path, not the execution graph. Created here so it's ready before
@@ -206,10 +228,19 @@ public final class Profiler {
         running = true;
         startedAtMillis = System.currentTimeMillis();
         stoppedAtMillis = 0;
+        if (hangDetection && loopWatcher.available()) {
+            long freezeMs = Math.max(2, plugin.getConfig().getInt("loop-hang-seconds", 10)) * 1000L;
+            hangWatchdog = new HangWatchdog(plugin, this, loopWatcher, freezeMs);
+            hangWatchdog.start();
+        }
     }
 
     public synchronized void stop() {
         if (!running) return;
+        if (hangWatchdog != null) {
+            try { hangWatchdog.stop(); } catch (Throwable ignored) {}
+            hangWatchdog = null;
+        }
         if (tickAggregator != null) {
             try { tickAggregator.cancel(); } catch (Throwable ignored) {}
             tickAggregator = null;
@@ -285,6 +316,8 @@ public final class Profiler {
         bodyTracedTriggers.clear();
         wrapperCache.clear();
         bodyRewires.clear();
+        loopWatcher.clear();
+        loopSampleCounter = 0;
         installAllHooks(false);
         // Source text was only needed for line matching during install; drop it so the rolling
         // buffer doesn't retain every script's text (mirrors startInternal).
@@ -296,6 +329,7 @@ public final class Profiler {
 
     private void sampleTick() {
         long t0 = System.nanoTime();
+        mainHeartbeatNanos = t0;  // liveness beacon for the hang watchdog (off-thread reader)
         long ns = currentTickNanos.getAndSet(0);
         long durationNs = lastSampleNanoTime == 0 ? 0 : t0 - lastSampleNanoTime;
         lastSampleNanoTime = t0;
@@ -327,6 +361,11 @@ public final class Profiler {
         }
         if (variableTracker != null) variableTracker.snapshotTick();
         if (variableFlushTracker != null) variableFlushTracker.tick();
+        // Coarsely sample running-loop counters (~1Hz) so the loops view has rate & age.
+        if (loopWatching && ++loopSampleCounter >= LOOP_SAMPLE_TICKS) {
+            loopSampleCounter = 0;
+            loopWatcher.sample(t0);
+        }
         selfOverheadNanos.addAndGet(System.nanoTime() - t0);
     }
 
@@ -385,6 +424,24 @@ public final class Profiler {
     public Map<String, TriggerStats> triggerStats() { return triggerStats; }
     public Map<String, EventStats> eventStats() { return eventStats; }
     public Map<String, TriggerStats> functionStats() { return functionStats; }
+    /** True when loop watching is enabled in config (read live, so it's correct before the
+     *  first start() — the runtime {@code loopWatching} flag is only set when profiling begins). */
+    public boolean loopWatchingEnabled() { return plugin.getConfig().getBoolean("loop-watching", true); }
+    /** True when this Skript build exposes the loop iteration counter we read. */
+    public boolean loopWatchingAvailable() { return loopWatcher.available(); }
+    /** How many loop/while sections we collected from the current generation's trigger bodies. */
+    public int trackedLoopCount() { return loopWatcher.trackedCount(); }
+    /** Snapshot of every loop running right now (iteration, rate, age), sorted by iteration desc. */
+    public List<LoopWatcher.Reading> loopSnapshot() { return loopWatcher.snapshot(System.nanoTime()); }
+    /** Every loop that ran during the window (peak iteration + live running state), for the report. */
+    public List<LoopWatcher.Reading> loopReportReadings() { return loopWatcher.reportReadings(System.nanoTime()); }
+    /** nanoTime of the last tick sample; read off-thread by the hang watchdog. 0 until first tick. */
+    public long mainHeartbeatNanos() { return mainHeartbeatNanos; }
+    /** True when the frozen-loop watchdog is enabled (config, read live). */
+    public boolean hangDetectionEnabled() {
+        return loopWatchingEnabled() && plugin.getConfig().getBoolean("loop-hang-detection", true);
+    }
+
     /** The variable-write tracker for the current/last window, or null when disabled/unavailable. */
     public VariableTracker variableTracker() { return variableTracker; }
     /** The variables.csv full-rewrite watcher for the current/last window, or null when disabled/unavailable. */
@@ -828,6 +885,8 @@ public final class Profiler {
         if (lineLevelTracing) {
             installBodyTracers(t, id);
         }
+        // Read-only graph walk to find loop/while sections (independent of lineLevelTracing).
+        collectLoops(t);
         wrapperCache.put(t, wrapper);
         return wrapper;
     }
@@ -1369,6 +1428,79 @@ public final class Profiler {
         return (TriggerItem) nextField.get(item);
     }
 
+    // ---------- Loop collection (read-only graph walk for the loops view) ----------
+
+    /**
+     * Walk a trigger body and register every loop/while section with the {@link LoopWatcher}.
+     * Read-only: it follows the same first/next graph the per-line tracer does but never rewrites
+     * it, so it's safe to run unconditionally (not gated behind line-level-profiling). Best-effort —
+     * bails silently on any reflective mismatch or an oversized body. Called once per unique trigger
+     * (wrapTrigger dedups via wrapperCache) and once per function.
+     */
+    private void collectLoops(Trigger original) {
+        if (!loopWatching || original == null || !loopWatcher.available()) return;
+        try {
+            Field firstField = TriggerSection.class.getDeclaredField("first");
+            firstField.setAccessible(true);
+            Field nextField = TriggerItem.class.getDeclaredField("next");
+            nextField.setAccessible(true);
+
+            Set<TriggerItem> all = Collections.newSetFromMap(new IdentityHashMap<>());
+            if (!collectReachable(original, firstField, nextField, all, MAX_REACHABLE_ITEMS)) return;
+
+            String script = "unknown";
+            Object scriptObj = readFieldByType(original, "org.skriptlang.skript.lang.script.Script");
+            if (scriptObj != null) script = scriptDisplayName(scriptObj);
+
+            for (TriggerItem item : all) {
+                if (!(item instanceof LoopSection loop)) continue;
+                String label = labelFor(loop);
+                boolean isWhile = loop.getClass().getSimpleName().contains("While");
+                loopWatcher.track(loop, script, loopLine(loop, script, label), label, isWhile);
+            }
+        } catch (Throwable ignored) {
+            // Per-trigger best-effort: a body we can't walk just contributes no loops.
+        }
+    }
+
+    /**
+     * Best-effort source line for a loop section: the reflective {@code getLineNumber()} accessor
+     * if this Skript build exposes one on trigger items, else a unique fuzzy match of the loop's
+     * label against the script source, else -1 (the label alone still identifies it).
+     */
+    private int loopLine(TriggerItem loop, String script, String label) {
+        try {
+            Object v = loop.getClass().getMethod("getLineNumber").invoke(loop);
+            if (v instanceof Integer i && i > 0) return i;
+        } catch (Throwable ignored) { }
+        return fuzzyLineFor(script, label);
+    }
+
+    /**
+     * Locate {@code label} in the script's source by normalized comparison, returning the 1-indexed
+     * line only when exactly one line matches — ambiguity yields -1 rather than a wrong number. Loop
+     * headers ("loop ...", "while ...") are distinctive enough that this is usually unique.
+     */
+    private int fuzzyLineFor(String script, String label) {
+        try {
+            String norm = normalizeForMatch(label);
+            if (norm.length() < 5) return -1;
+            List<String> lines = loadScriptLines(script);
+            int found = -1;
+            for (int i = 0; i < lines.size(); i++) {
+                String sn = normalizeForMatch(lines.get(i));
+                if (sn.isEmpty()) continue;
+                if (sn.equals(norm) || sn.startsWith(norm)) {
+                    if (found != -1) return -1;   // ambiguous — don't guess
+                    found = i + 1;
+                }
+            }
+            return found;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     /**
      * BFS the reachable set from trigger.first via first/next pointers. Returns
      * true if the whole set fit within {@code cap}, false if we bailed early.
@@ -1790,6 +1922,7 @@ public final class Profiler {
         functionStats.put(id, buildFunctionStats(id, name, original));
         // Per-line tracing inside the function body, gated by the same opt-in as triggers.
         if (lineLevelTracing) installBodyTracers(original, id);
+        collectLoops(original);
         trigField.set(fn, wrapper);
         functionSwaps.add(new SchedulerSwap(trigField, fn, original, wrapper));
         return true;

@@ -5,6 +5,7 @@ package dev.sktrace.report;
 import dev.sktrace.Sktrace;
 import dev.sktrace.profiler.EventStats;
 import dev.sktrace.profiler.ItemStats;
+import dev.sktrace.profiler.LoopWatcher;
 import dev.sktrace.profiler.Profiler;
 import dev.sktrace.profiler.TriggerStats;
 import dev.sktrace.profiler.VariableFlushTracker;
@@ -235,6 +236,7 @@ public final class ReportWriter {
         sb.append("]");
         appendVariablesJson(sb, maskSecrets);
         appendFlushJson(sb, totals.length, includeVariableValues, maskSecrets);
+        appendLoopsJson(sb);
         // Script sources are emitted ONCE here as a shared map (script name -> text),
         // never inline per unit. Many functions (and triggers) share one script file,
         // so inlining duplicated the same source dozens of times and could push a
@@ -357,6 +359,43 @@ public final class ReportWriter {
                 sb.append(",\"type\":\"").append(jsonEscape(v.lastType)).append("\"");
             }
             sb.append('}');
+        }
+        sb.append("]}");
+    }
+
+    /**
+     * Append {@code ,"loops":{...}} listing every loop/while section seen running during the window,
+     * with its peak iteration, peak concurrency, and whether it's still going at report time. When
+     * loop watching is off or unsupported we still emit the object (with {@code ok:false}) so the
+     * report can explain the empty section. Only loops that span ticks (contain a wait) are ever
+     * observed — see LoopWatcher.
+     */
+    private void appendLoopsJson(StringBuilder sb) {
+        sb.append(",\"loops\":{");
+        if (!profiler.loopWatchingEnabled()) {
+            sb.append("\"ok\":false,\"reason\":\"Loop watching is off. Enable loop-watching in config.yml.\"}");
+            return;
+        }
+        if (!profiler.loopWatchingAvailable()) {
+            sb.append("\"ok\":false,\"reason\":\"Loop watching isn't supported on this Skript build.\"}");
+            return;
+        }
+        sb.append("\"ok\":true,\"items\":[");
+        boolean first = true;
+        for (LoopWatcher.Reading r : profiler.loopReportReadings()) {
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"script\":\"").append(jsonEscape(r.script)).append("\"")
+                    .append(",\"line\":").append(r.line)
+                    .append(",\"name\":\"").append(jsonEscape(r.label)).append("\"")
+                    .append(",\"isWhile\":").append(r.isWhile)
+                    .append(",\"peakIter\":").append(r.peakIter)
+                    .append(",\"peakConcurrent\":").append(r.peakConcurrent)
+                    .append(",\"currentIter\":").append(r.currentIter)
+                    .append(",\"running\":").append(r.running)
+                    .append(",\"itersPerSec\":").append(Math.round(r.itersPerSec))
+                    .append(",\"ageMs\":").append(r.ageMillis)
+                    .append('}');
         }
         sb.append("]}");
     }
