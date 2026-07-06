@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>dev.sktrace</groupId>
-    <artifactId>Sktrace</artifactId>
+    <artifactId>skTrace</artifactId>
     <version>0.1.5</version>
     <packaging>jar</packaging>
 

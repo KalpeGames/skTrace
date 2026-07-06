@@ -1,12 +1,12 @@
-# Sktrace configuration.
+# skTrace configuration.
 
-# Anonymous usage metrics via bStats (https://bstats.org). Sktrace reports
+# Anonymous usage metrics via bStats (https://bstats.org). skTrace reports
 # generic server info (server count, player count, server software and version,
-# Java version) plus three Sktrace-specific charts: whether the rolling buffer
+# Java version) plus three skTrace-specific charts: whether the rolling buffer
 # is on, whether line-level profiling is on, and which Skript version is
 # installed. No personal or server-identifying data is collected. You can also
 # opt every bStats plugin out at once in
-# plugins/bStats/config.yml. Set to false to turn Sktrace's metrics off.
+# plugins/bStats/config.yml. Set to false to turn skTrace's metrics off.
 metrics: true
 
 # Update checker (on by default).
@@ -20,9 +20,9 @@ update-checker: true
 # Endpoint that /sktrace report uploads to. Reports are POSTed as text/html;
 # the server returns a JSON {"code","url"} pair and players get a clickable link.
 #
-# Default points at the public Sktrace worker (reports expire 24h after upload).
+# Default points at the public skTrace worker (reports expire 24h after upload).
 # Set to an empty string to disable uploads entirely — reports will still be
-# written to plugins/Sktrace/reports/. To self-host, deploy the worker in this
+# written to plugins/skTrace/reports/. To self-host, deploy the worker in this
 # repo's /worker directory and replace the URL.
 upload-endpoint: "https://sktrace.kal.pe/upload"
 
@@ -45,7 +45,7 @@ rolling:
 
 # Line-level profiling (EXPERIMENTAL — off by default).
 #
-# When on, Sktrace instruments individual statements inside each trigger so the
+# When on, skTrace instruments individual statements inside each trigger so the
 # report can show which exact lines are hottest and highlight them in the source
 # viewer. To do that it rewrites Skript's internal trigger graph via reflection.
 # That graph varies across Skript versions, addons, and script constructs
@@ -117,7 +117,7 @@ loop-hang-seconds: 10
 # created / updated / deleted, so the report's Variables section can show what's
 # churning your variables.csv.
 #
-# How it works: Sktrace passively observes Skript's variable save path — the same
+# How it works: skTrace passively observes Skript's variable save path — the same
 # path that writes variables.csv (or your database). It never changes how scripts
 # run, and it never reads or scans your existing variables, so there is NO cost
 # from a large variables.csv. If your Skript version's internals differ, tracking
@@ -138,3 +138,37 @@ variable-tracking: true
 # beyond this cap — only the per-name list is bounded, to keep memory in check on
 # servers that touch a huge number of distinct variables.
 variable-tracking-max-distinct: 5000
+
+# Parse-time auditing.
+#
+# Everything else in skTrace profiles scripts at RUNTIME — once they're already loaded.
+# This audits the one thing the runtime profiler can never see: how long each SCRIPT takes
+# to PARSE (load) in the first place. A script can be expensive to load (huge multi-branch
+# conditions, deeply nested expressions, thousands of generated lines) without being slow to
+# run, and that cost is otherwise invisible — it scrolls past in console on boot/reload. This is
+# measured per LINE, so it points a builder at the exact line to look at.
+#
+# HOW IT MEASURES (and why you can trust it): /sktrace parse -> confirm re-parses each LINE in a
+# sandbox and times it directly. It does NOT reload or register anything (so no player is kicked
+# and running triggers are untouched); it just runs Skript's parser over the source text to see
+# how long each line takes to build. It runs a few passes per line and keeps the fastest — the
+# least noise-contaminated sample.
+#
+# ACCOUNTING FOR YOUR SERVER'S CONDITION (without reading hardware specs): absolute
+# milliseconds aren't portable — the same work is 8ms on a fast idle box and 60ms on a loaded
+# one. So in the same pass we measure the machine's CURRENT "noise floor" (what a trivial load
+# costs right now) and the run's own spread. A script is flagged only when it's BOTH well above
+# that floor AND a robust statistical outlier for this run. A loaded server raises both, so the
+# ranking means the same anywhere. Scripts too small to measure are reported as "—", not ranked.
+parse-audit:
+  # A line is flagged if Skript measures it taking longer than this many milliseconds to PARSE.
+  # This is Skript's own "long parse time warning threshold", which we lower for the audit. Parse
+  # time is CPU-bound single-threaded work during load, so unlike runtime cost it doesn't swing
+  # much with server load — a line that takes >2ms to parse is heavy on any machine. Lower = more
+  # lines flagged. 2ms is a good "worth a builder's attention" bar.
+  slow-line-threshold-ms: 2
+  # Admin join notifier: tell admins (permission sktrace.audit.notify) on join when the latest
+  # audit found notable scripts. Fires at most once per admin per audit.
+  notify-max-lines: 5
+  # How many audit report files to keep in plugins/skTrace/audits/ before pruning the oldest.
+  keep-files: 10

@@ -2,11 +2,7 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace;
 
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickEvent;
-import net.kyori.adventure.text.event.HoverEvent;
-import net.kyori.adventure.text.format.TextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -47,13 +43,10 @@ public final class UpdateChecker implements Listener {
     private static final Pattern VERSION_NUMBER = Pattern.compile("\"version_number\"\\s*:\\s*\"([^\"]*)\"");
     private static final Pattern VERSION_TYPE = Pattern.compile("\"version_type\"\\s*:\\s*\"([^\"]*)\"");
 
-    private static final TextColor ACCENT = TextColor.color(0xff9b3d);  // skTrace orange
-    private static final TextColor TEXT = TextColor.color(0xe8eaed);
-    private static final TextColor DIM = TextColor.color(0x6b7180);
-    private static final TextColor OK = TextColor.color(0x7ee787);
-    private static final TextColor LINK = TextColor.color(0x6cb6ff);
+    private static final MiniMessage MM = MiniMessage.miniMessage();
+    private static final String PREFIX = "<gray>[<gold>skTrace<gray>] ";
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final String currentVersion;
     private final String userAgent;
     private final HttpClient client;
@@ -64,7 +57,7 @@ public final class UpdateChecker implements Listener {
     // Last version we logged to console, so a repeating check doesn't re-log the same notice.
     private volatile String loggedVersion;
 
-    public UpdateChecker(Sktrace plugin) {
+    public UpdateChecker(SkTrace plugin) {
         this.plugin = plugin;
         this.currentVersion = plugin.getDescription().getVersion();
         this.userAgent = "KalpeGames/skTrace/" + currentVersion + " (github.com/KalpeGames/skTrace)";
@@ -74,7 +67,7 @@ public final class UpdateChecker implements Listener {
     /** Schedule the checks and register the join listener, unless disabled in config. */
     public void start() {
         if (!plugin.getConfig().getBoolean("update-checker", true)) {
-            plugin.getLogger().fine("[Sktrace] Update checker disabled via config.");
+            plugin.getLogger().fine("[skTrace] Update checker disabled via config.");
             return;
         }
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
@@ -94,7 +87,7 @@ public final class UpdateChecker implements Listener {
                     .build();
             HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() / 100 != 2) {
-                plugin.getLogger().fine("[Sktrace] Update check: HTTP " + resp.statusCode());
+                plugin.getLogger().fine("[skTrace] Update check: HTTP " + resp.statusCode());
                 return;
             }
             String latest = latestRelease(resp.body());
@@ -102,8 +95,8 @@ public final class UpdateChecker implements Listener {
                 latestVersion = latest;
                 if (!latest.equals(loggedVersion)) {
                     loggedVersion = latest;
-                    plugin.getLogger().info("Update available: skTrace " + latest + " (you're on "
-                            + currentVersion + "). Download: " + DOWNLOAD_BASE + latest);
+                    plugin.getLogger().info("A newer version is out, skTrace " + latest + " (you are on "
+                            + currentVersion + "). Get it at " + DOWNLOAD_BASE + latest);
                 }
             } else {
                 latestVersion = null;   // up to date, or running a dev build ahead of the release
@@ -112,7 +105,7 @@ public final class UpdateChecker implements Listener {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             // Network hiccups, DNS, offline servers — never let an update check be noisy or fatal.
-            plugin.getLogger().fine("[Sktrace] Update check failed: " + e.getMessage());
+            plugin.getLogger().fine("[skTrace] Update check failed: " + e.getMessage());
         }
     }
 
@@ -131,21 +124,10 @@ public final class UpdateChecker implements Listener {
 
     private void sendNotice(Player p, String latest) {
         String url = DOWNLOAD_BASE + latest;
-        p.sendMessage(prefix()
-                .append(Component.text("Update available: ", TEXT))
-                .append(Component.text(latest, OK).decorate(TextDecoration.BOLD))
-                .append(Component.text(" (you have " + currentVersion + ")", DIM)));
-        p.sendMessage(prefix()
-                .append(Component.text("Download: ", TEXT))
-                .append(Component.text(url, LINK).decorate(TextDecoration.UNDERLINED)
-                        .clickEvent(ClickEvent.openUrl(url))
-                        .hoverEvent(HoverEvent.showText(Component.text("Open on Modrinth", DIM)))));
-    }
-
-    private static Component prefix() {
-        return Component.text("[", DIM)
-                .append(Component.text("skTrace", ACCENT).decorate(TextDecoration.BOLD))
-                .append(Component.text("] ", DIM));
+        p.sendMessage(MM.deserialize(PREFIX + "<white>A newer version is out, " + "<gold>" + latest
+                + "<white>. You are on <gold>" + currentVersion + "<white>."));
+        p.sendMessage(MM.deserialize(PREFIX + "<white>Get it at <click:open_url:'" + url
+                + "'><hover:show_text:'<gold>Open on Modrinth'><aqua>" + url + "</aqua></hover></click><white>."));
     }
 
     /**

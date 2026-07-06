@@ -30,14 +30,14 @@ final class ConfigUpdater {
     private ConfigUpdater() {}
 
     /** @return number of new keys added (0 if the config was already current or on any failure). */
-    static int merge(Sktrace plugin) {
+    static int merge(SkTrace plugin) {
         InputStream in = plugin.getResource("config.yml");
         if (in == null) return 0;
         YamlConfiguration defaults;
         try (InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
             defaults = YamlConfiguration.loadConfiguration(reader);
         } catch (Exception e) {
-            plugin.getLogger().log(Level.FINE, "[Sktrace] config merge: couldn't read bundled default: " + e.getMessage());
+            plugin.getLogger().log(Level.FINE, "[skTrace] config merge: couldn't read bundled default: " + e.getMessage());
             return 0;
         }
 

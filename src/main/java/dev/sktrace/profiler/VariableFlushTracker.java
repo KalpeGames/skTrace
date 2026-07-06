@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace.profiler;
 
-import dev.sktrace.Sktrace;
+import dev.sktrace.SkTrace;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
@@ -49,7 +49,7 @@ import java.util.logging.Level;
  */
 public final class VariableFlushTracker {
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     // Source of the per-save variable list: rotated at each flush so a save can be paired with the
     // variables it compacted. May be null (variable tracking disabled) — then flushes carry no vars.
     private final VariableTracker variableTracker;
@@ -85,7 +85,7 @@ public final class VariableFlushTracker {
     private static final int MAX_FLUSHES = 256;
     private final List<Flush> flushes = Collections.synchronizedList(new ArrayList<>());
 
-    public VariableFlushTracker(Sktrace plugin, VariableTracker variableTracker) {
+    public VariableFlushTracker(SkTrace plugin, VariableTracker variableTracker) {
         this.plugin = plugin;
         this.variableTracker = variableTracker;
     }
@@ -138,17 +138,17 @@ public final class VariableFlushTracker {
                     StandardWatchEventKinds.ENTRY_DELETE,
                     StandardWatchEventKinds.ENTRY_MODIFY);
 
-            watchThread = new Thread(this::watchLoop, "Sktrace-csv-watch");
+            watchThread = new Thread(this::watchLoop, "SkTrace-csv-watch");
             watchThread.setDaemon(true);
             watchThread.start();
 
             ok = true;
             reason = null;
-            plugin.getLogger().info("[Sktrace] Watching " + csvFile.getName() + " for full saves.");
+            plugin.getLogger().info("[skTrace] Watching " + csvFile.getName() + " for full saves.");
         } catch (Throwable t) {
             ok = false;
             reason = t.getClass().getSimpleName() + ": " + t.getMessage();
-            plugin.getLogger().log(Level.FINE, "[Sktrace] CSV save tracking unavailable: " + t.getMessage());
+            plugin.getLogger().log(Level.FINE, "[skTrace] CSV save tracking unavailable: " + t.getMessage());
             closeQuietly();
         }
     }
@@ -193,7 +193,7 @@ public final class VariableFlushTracker {
                 }
             } catch (Throwable t) {
                 // A rewrite's bookkeeping must never kill the watcher or the server.
-                plugin.getLogger().log(Level.FINE, "[Sktrace] CSV watch event error: " + t.getMessage());
+                plugin.getLogger().log(Level.FINE, "[skTrace] CSV watch event error: " + t.getMessage());
             }
             if (!key.reset()) break;
         }
@@ -282,7 +282,7 @@ public final class VariableFlushTracker {
             }
             if (csvFile != null) return;
         } catch (Throwable t) {
-            plugin.getLogger().log(Level.FINE, "[Sktrace] Could not reflect variables.csv path: " + t.getMessage());
+            plugin.getLogger().log(Level.FINE, "[skTrace] Could not reflect variables.csv path: " + t.getMessage());
         }
         // Fallback to Skript's default location if reflection found nothing.
         Plugin skript = Bukkit.getPluginManager().getPlugin("Skript");

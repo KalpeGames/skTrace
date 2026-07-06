@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace.profiler;
 
-import dev.sktrace.Sktrace;
+import dev.sktrace.SkTrace;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 
@@ -55,7 +55,7 @@ import java.util.logging.Level;
  */
 public final class VariableTracker {
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final int maxDistinct;
     private final int tickCapacity;
 
@@ -105,7 +105,7 @@ public final class VariableTracker {
     private Field valueTypeField;
     private Field svDataField;
 
-    public VariableTracker(Sktrace plugin, int maxDistinct, int tickCapacity) {
+    public VariableTracker(SkTrace plugin, int maxDistinct, int tickCapacity) {
         this.plugin = plugin;
         this.maxDistinct = Math.max(1, maxDistinct);
         this.tickCapacity = Math.max(0, tickCapacity);
@@ -147,7 +147,7 @@ public final class VariableTracker {
                     wrapped++;
                 } catch (Throwable t) {
                     plugin.getLogger().log(Level.FINE,
-                            "[Sktrace] variable tracker: could not wrap a storage queue: " + t.getMessage());
+                            "[skTrace] variable tracker: could not wrap a storage queue: " + t.getMessage());
                 }
             }
             if (wrapped == 0) {
@@ -159,11 +159,11 @@ public final class VariableTracker {
             }
             ok = true;
             reason = null;
-            plugin.getLogger().info("[Sktrace] Variable tracking active on " + wrapped + " storage queue(s).");
+            plugin.getLogger().info("[skTrace] Variable tracking active on " + wrapped + " storage queue(s).");
         } catch (Throwable t) {
             ok = false;
             reason = t.getClass().getSimpleName() + ": " + t.getMessage();
-            plugin.getLogger().log(Level.FINE, "[Sktrace] Variable tracking unavailable: " + t.getMessage());
+            plugin.getLogger().log(Level.FINE, "[skTrace] Variable tracking unavailable: " + t.getMessage());
         }
     }
 
@@ -174,7 +174,7 @@ public final class VariableTracker {
                 s.field.set(s.holder, s.original);
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING,
-                        "[Sktrace] Failed to restore a variable storage queue: " + t.getMessage(), t);
+                        "[skTrace] Failed to restore a variable storage queue: " + t.getMessage(), t);
             }
         }
         swaps.clear();

@@ -23,7 +23,7 @@ public final class ReportUploader {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
-    private static final String USER_AGENT = "Sktrace/0.1.3";
+    private static final String USER_AGENT = "SkTrace/0.1.3";
 
     private final String endpoint;
     private final HttpClient client;
@@ -42,7 +42,7 @@ public final class ReportUploader {
                 .timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "text/html; charset=utf-8")
                 .header("User-Agent", USER_AGENT)
-                .header("X-Sktrace-Include-Sources", includeSources ? "true" : "false")
+                .header("X-SkTrace-Include-Sources", includeSources ? "true" : "false")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(body))
                 .build();
 

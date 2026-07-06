@@ -1182,7 +1182,7 @@
       '<span><b>Skript over 50ms</b><div>' + over + ' / ' + span +
         (over > 0 ? ' (' + (100 * over / span).toFixed(1) + '%)' : '') + '</div></span>' +
       realHtml +
-      '<span><b>Sktrace overhead</b><div>' + (overheadPerTick / 1e3).toFixed(2) + ' \u03bcs/tick (' + overheadPct + '%)</div></span>';
+      '<span><b>skTrace overhead</b><div>' + (overheadPerTick / 1e3).toFixed(2) + ' \u03bcs/tick (' + overheadPct + '%)</div></span>';
   }
 
   function ensureRect(){
@@ -1410,7 +1410,7 @@
       : 'Skript performance over the captured window');
     setText('hdr-ts', data.generatedAt || '');
     setText('donut-window', 'total over ' + winSec.toFixed(1) + 's window');
-    document.title = (clip ? 'Sktrace Clip' : 'Sktrace Profile')
+    document.title = (clip ? 'skTrace Clip' : 'skTrace Profile')
       + (data.generatedAt ? ' \u00b7 ' + data.generatedAt : '');
 
     if (!data.hooksOk){

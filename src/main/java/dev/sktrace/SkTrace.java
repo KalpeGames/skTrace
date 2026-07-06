@@ -2,21 +2,23 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace;
 
-import dev.sktrace.command.SktraceCommand;
+import dev.sktrace.command.SkTraceCommand;
 import dev.sktrace.profiler.Profiler;
 import org.bstats.bukkit.Metrics;
 import org.bstats.charts.SimplePie;
 import org.bukkit.plugin.java.JavaPlugin;
 
-public final class Sktrace extends JavaPlugin {
+public final class SkTrace extends JavaPlugin {
 
-    // bStats plugin id for Sktrace (https://bstats.org/plugin/bukkit/Sktrace/31715).
+    // bStats plugin id for SkTrace (https://bstats.org/plugin/bukkit/SkTrace/31715).
     // Set to 0 or negative to keep metrics off without touching the rest of the code.
     private static final int BSTATS_PLUGIN_ID = 31715;
 
     private Profiler profiler;
     private ProfilingIndicator indicator;
     private ReloadHookGuard reloadGuard;
+    private dev.sktrace.parse.ParseProfiler parseProfiler;
+    private dev.sktrace.parse.ParseNotifier parseNotifier;
 
     @Override
     public void onEnable() {
@@ -38,9 +40,18 @@ public final class Sktrace extends JavaPlugin {
         reloadGuard = new ReloadHookGuard(this, profiler);
         reloadGuard.register();
 
+        // Parse-time auditing: which lines are slow to LOAD (invisible to the runtime profiler,
+        // which only sees a script once it's already parsed). Passive mode instruments organic
+        // reloads; the notifier surfaces findings to admins on join. Independent of the runtime
+        // profiler above — it never has to be "started".
+        parseProfiler = new dev.sktrace.parse.ParseProfiler(this);
+        parseProfiler.armPassive();
+        parseNotifier = new dev.sktrace.parse.ParseNotifier(this, parseProfiler);
+        getServer().getPluginManager().registerEvents(parseNotifier, this);
+
         var cmd = getCommand("sktrace");
         if (cmd != null) {
-            var handler = new SktraceCommand(this, profiler, indicator);
+            var handler = new SkTraceCommand(this, profiler, indicator, parseProfiler);
             cmd.setExecutor(handler);
             cmd.setTabCompleter(handler);
         }
@@ -58,11 +69,11 @@ public final class Sktrace extends JavaPlugin {
             int windowSec = Math.max(5, getConfig().getInt("rolling.windowSeconds", 60));
             getServer().getScheduler().runTaskLater(this, () -> {
                 profiler.startRolling(windowSec);
-                getLogger().info("Sktrace rolling buffer active (" + windowSec + "s window). Use /sktrace clip.");
+                getLogger().info("skTrace rolling buffer active (" + windowSec + "s window). Use /sktrace clip.");
             }, 20L);
-            getLogger().info("Sktrace loaded — rolling buffer will activate shortly.");
+            getLogger().info("skTrace loaded — rolling buffer will activate shortly.");
         } else {
-            getLogger().info("Sktrace loaded. Run /sktrace start to begin profiling.");
+            getLogger().info("skTrace loaded. Run /sktrace start to begin profiling.");
         }
     }
 
@@ -85,17 +96,17 @@ public final class Sktrace extends JavaPlugin {
     // and shuts down with the plugin, so there's nothing to tear down on disable.
     private void setupMetrics() {
         if (!getConfig().getBoolean("metrics", true)) {
-            return; // opted out for Sktrace specifically
+            return; // opted out for skTrace specifically
         }
         if (BSTATS_PLUGIN_ID <= 0) {
             getLogger().info("bStats metrics disabled: no plugin id set yet. Register at "
-                    + "https://bstats.org/add-plugin/bukkit and set BSTATS_PLUGIN_ID in Sktrace.java.");
+                    + "https://bstats.org/add-plugin/bukkit and set BSTATS_PLUGIN_ID in SkTrace.java.");
             return;
         }
 
         Metrics metrics = new Metrics(this, BSTATS_PLUGIN_ID);
 
-        // Sktrace-specific charts on top of bStats' built-in server/player counts.
+        // skTrace-specific charts on top of bStats' built-in server/player counts.
         metrics.addCustomChart(new SimplePie("rolling_buffer",
                 () -> getConfig().getBoolean("rolling.enabled", false) ? "enabled" : "disabled"));
         metrics.addCustomChart(new SimplePie("line_level_profiling",
@@ -118,6 +129,8 @@ public final class Sktrace extends JavaPlugin {
         // Drop the loader-event proxies first so Skript's registry doesn't keep a reference to
         // this (possibly about-to-be-discarded) classloader across a plugin-manager reload.
         if (reloadGuard != null) reloadGuard.unregister();
+        // Same rationale for the parse-audit listeners registered on ScriptLoader.eventRegistry().
+        if (parseProfiler != null) parseProfiler.disarmPassive();
         if (profiler != null && profiler.isRunning()) profiler.stop();
     }
 

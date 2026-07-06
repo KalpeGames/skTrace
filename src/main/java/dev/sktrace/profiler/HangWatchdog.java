@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace.profiler;
 
-import dev.sktrace.Sktrace;
+import dev.sktrace.SkTrace;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -27,7 +27,7 @@ public final class HangWatchdog {
     private static final long CHECK_INTERVAL_MS = 1000L;
     private static final long PROBE_GAP_MS = 150L;
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final Profiler profiler;
     private final LoopWatcher loopWatcher;
     private final long freezeMillis;
@@ -39,7 +39,7 @@ public final class HangWatchdog {
     // Peak staleness seen during the current episode, for the recovery message.
     private long episodePeakStaleMs;
 
-    public HangWatchdog(Sktrace plugin, Profiler profiler, LoopWatcher loopWatcher, long freezeMillis) {
+    public HangWatchdog(SkTrace plugin, Profiler profiler, LoopWatcher loopWatcher, long freezeMillis) {
         this.plugin = plugin;
         this.profiler = profiler;
         this.loopWatcher = loopWatcher;
@@ -51,7 +51,7 @@ public final class HangWatchdog {
         active = true;
         reportedThisEpisode = false;
         episodePeakStaleMs = 0;
-        thread = new Thread(this::run, "Sktrace-HangWatchdog");
+        thread = new Thread(this::run, "skTrace-HangWatchdog");
         thread.setDaemon(true);
         thread.start();
     }
@@ -94,7 +94,7 @@ public final class HangWatchdog {
         if (staleMs < freezeMillis) {
             // Healthy (or recovered).
             if (reportedThisEpisode) {
-                plugin.getLogger().warning("[Sktrace] Main thread recovered — it was frozen for ~"
+                plugin.getLogger().warning("[skTrace] Main thread recovered — it was frozen for ~"
                         + (episodePeakStaleMs / 1000) + "s.");
             }
             reportedThisEpisode = false;
@@ -113,13 +113,13 @@ public final class HangWatchdog {
         LoopWatcher.Probe culprit = findRunaway();
         if (culprit != null) {
             String loc = culprit.script + (culprit.line > 0 ? ":" + culprit.line : "");
-            plugin.getLogger().severe("[Sktrace] MAIN THREAD FROZEN for ~" + sec + "s — runaway "
+            plugin.getLogger().severe("[skTrace] MAIN THREAD FROZEN for ~" + sec + "s — runaway "
                     + (culprit.isWhile ? "while" : "loop") + " at " + loc
                     + "  [" + culprit.label + "]  is pinning the server"
                     + (culprit.maxIter > 0 ? " (iteration " + String.format("%,d", culprit.maxIter) + " and climbing)" : "")
                     + ". It has no wait/delay, so it never yields. Stop the server or fix that loop.");
         } else {
-            plugin.getLogger().severe("[Sktrace] MAIN THREAD FROZEN for ~" + sec
+            plugin.getLogger().severe("[skTrace] MAIN THREAD FROZEN for ~" + sec
                     + "s — couldn't pinpoint a Skript loop (it may not be loop-related). Main-thread stack:");
             dumpMainThreadStack();
         }
@@ -171,7 +171,7 @@ public final class HangWatchdog {
                 List<String> lines = new ArrayList<>();
                 int limit = Math.min(frames.length, 18);
                 for (int i = 0; i < limit; i++) lines.add("    at " + frames[i]);
-                plugin.getLogger().severe("[Sktrace] " + name + ":\n" + String.join("\n", lines));
+                plugin.getLogger().severe("[skTrace] " + name + ":\n" + String.join("\n", lines));
                 return;
             }
         } catch (Throwable ignored) { }

@@ -5,8 +5,7 @@ package dev.sktrace;
 import dev.sktrace.profiler.Profiler;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.TextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -23,25 +22,22 @@ public final class ProfilingIndicator implements Listener {
 
     private static final String PERMISSION = "sktrace.use";
 
-    private static final TextColor ACCENT = TextColor.color(0xff9b3d);  // sktrace orange
-    private static final TextColor TEXT = TextColor.color(0xe8eaed);
-    private static final TextColor DIM = TextColor.color(0x6b7180);
-    private static final TextColor OK = TextColor.color(0x7ee787);
+    private static final MiniMessage MM = MiniMessage.miniMessage();
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final Profiler profiler;
 
     private BossBar bar;
     private BukkitTask updateTask;
 
-    public ProfilingIndicator(Sktrace plugin, Profiler profiler) {
+    public ProfilingIndicator(SkTrace plugin, Profiler profiler) {
         this.plugin = plugin;
         this.profiler = profiler;
     }
 
     public synchronized void start() {
         if (bar != null) return;
-        bar = BossBar.bossBar(renderTitle(0), 1.0f, BossBar.Color.BLUE, BossBar.Overlay.PROGRESS);
+        bar = BossBar.bossBar(renderTitle(0), 1.0f, BossBar.Color.YELLOW, BossBar.Overlay.PROGRESS);
         for (Player p : Bukkit.getOnlinePlayers()) {
             if (p.hasPermission(PERMISSION)) p.showBossBar(bar);
         }
@@ -77,13 +73,6 @@ public final class ProfilingIndicator implements Listener {
         long m = sec / 60;
         long s = sec % 60;
         String time = m > 0 ? m + "m " + s + "s" : s + "s";
-        // Root at empty (unstyled) so BOLD on the glyph/name doesn't inherit into
-        // the rest of the title — Adventure propagates unset decorations downward.
-        return Component.empty()
-                .append(Component.text("▶ ", OK, TextDecoration.BOLD))
-                .append(Component.text("skTrace", TEXT, TextDecoration.BOLD))
-                .append(Component.text(" profiling", TEXT))
-                .append(Component.text("  ·  ", DIM))
-                .append(Component.text(time, ACCENT));
+        return MM.deserialize("<gray>[<gold>skTrace<gray>] <white>Profiler active for <green>" + time + "<white>.");
     }
 }

@@ -8,7 +8,7 @@ import ch.njol.skript.lang.Trigger;
 import ch.njol.skript.lang.TriggerItem;
 import ch.njol.skript.lang.TriggerSection;
 import com.google.common.collect.Multimap;
-import dev.sktrace.Sktrace;
+import dev.sktrace.SkTrace;
 import org.bukkit.Bukkit;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventPriority;
@@ -43,7 +43,7 @@ import java.util.logging.Level;
  */
 public final class Profiler {
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
 
     private final Map<String, TriggerStats> triggerStats = new ConcurrentHashMap<>();
     private final Map<String, EventStats> eventStats = new ConcurrentHashMap<>();
@@ -144,10 +144,10 @@ public final class Profiler {
     private int tickWritePos = 0;
     private BukkitTask tickAggregator;
 
-    // Self-overhead: total nanoseconds Sktrace's own bookkeeping consumes during the window.
+    // Self-overhead: total nanoseconds skTrace's own bookkeeping consumes during the window.
     private final AtomicLong selfOverheadNanos = new AtomicLong();
 
-    public Profiler(Sktrace plugin) {
+    public Profiler(SkTrace plugin) {
         this.plugin = plugin;
     }
 
@@ -323,7 +323,7 @@ public final class Profiler {
         // buffer doesn't retain every script's text (mirrors startInternal).
         scriptSourceCache.clear();
         suspended = false;
-        plugin.getLogger().info("[Sktrace] Re-synced profiler hooks after Skript reload ("
+        plugin.getLogger().info("[skTrace] Re-synced profiler hooks after Skript reload ("
                 + triggerSwaps.size() + " triggers, " + functionSwaps.size() + " functions).");
     }
 
@@ -585,7 +585,7 @@ public final class Profiler {
     private void installTriggerHooks(boolean verbose) {
         try {
             Class<?> handlerClass = Class.forName("ch.njol.skript.SkriptEventHandler");
-            if (verbose) plugin.getLogger().info("[Sktrace] Scanning ch.njol.skript.SkriptEventHandler for trigger registries...");
+            if (verbose) plugin.getLogger().info("[skTrace] Scanning ch.njol.skript.SkriptEventHandler for trigger registries...");
 
             int hookedBefore = triggerSwaps.size();
             for (Field f : handlerClass.getDeclaredFields()) {
@@ -595,27 +595,27 @@ public final class Profiler {
                     f.setAccessible(true);
                     value = f.get(null);
                 } catch (Throwable t) {
-                    if (verbose) plugin.getLogger().info("[Sktrace]   " + f.getName() + ": (inaccessible)");
+                    if (verbose) plugin.getLogger().info("[skTrace]   " + f.getName() + ": (inaccessible)");
                     continue;
                 }
                 if (verbose) {
                     String summary = describeValue(value);
-                    plugin.getLogger().info("[Sktrace]   " + f.getName() + " : "
+                    plugin.getLogger().info("[skTrace]   " + f.getName() + " : "
                             + f.getType().getSimpleName() + " = " + summary);
                 }
                 if (value == null) continue;
                 int n = tryHookContainer(value, "SkriptEventHandler." + f.getName());
-                if (n > 0 && verbose) plugin.getLogger().info("[Sktrace]     -> hooked " + n + " triggers here");
+                if (n > 0 && verbose) plugin.getLogger().info("[skTrace]     -> hooked " + n + " triggers here");
             }
 
             int hooked = triggerSwaps.size() - hookedBefore;
-            if (verbose) plugin.getLogger().info("[Sktrace] Total triggers hooked: " + hooked);
+            if (verbose) plugin.getLogger().info("[skTrace] Total triggers hooked: " + hooked);
 
             if (hooked == 0) {
                 triggerHooksAvailable = false;
                 triggerHookFailureReason = "No Trigger objects found inside SkriptEventHandler. "
                         + "Run /sktrace diag and share the console output.";
-                plugin.getLogger().warning("[Sktrace] " + triggerHookFailureReason);
+                plugin.getLogger().warning("[skTrace] " + triggerHookFailureReason);
             }
         } catch (Throwable t) {
             triggerHooksAvailable = false;
@@ -666,7 +666,7 @@ public final class Profiler {
             int found = 0;
             for (Object o : col) if (unwrapTrigger(o) != null) found++;
             if (found > 0) {
-                plugin.getLogger().info("[Sktrace]     (found " + found
+                plugin.getLogger().info("[skTrace]     (found " + found
                         + " trigger-like entries in " + path + " but cannot replace in this collection type)");
             }
             return 0;
@@ -698,7 +698,7 @@ public final class Profiler {
                 }
                 hooked++;
             } catch (Throwable t) {
-                plugin.getLogger().log(Level.FINE, "[Sktrace] Set wrap failed: " + t.getMessage());
+                plugin.getLogger().log(Level.FINE, "[skTrace] Set wrap failed: " + t.getMessage());
             }
         }
         return hooked;
@@ -748,13 +748,13 @@ public final class Profiler {
     public void runDiagnostic() {
         try {
             Class<?> handlerClass = Class.forName("ch.njol.skript.SkriptEventHandler");
-            plugin.getLogger().info("[Sktrace diag] === SkriptEventHandler static fields ===");
+            plugin.getLogger().info("[skTrace diag] === SkriptEventHandler static fields ===");
             for (Field f : handlerClass.getDeclaredFields()) {
                 if (!Modifier.isStatic(f.getModifiers())) continue;
                 try {
                     f.setAccessible(true);
                     Object v = f.get(null);
-                    plugin.getLogger().info("[Sktrace diag] " + f.getName() + " : "
+                    plugin.getLogger().info("[skTrace diag] " + f.getName() + " : "
                             + f.getType().getSimpleName() + " = " + describeValue(v));
                     if (v instanceof Multimap<?, ?> mm && !mm.isEmpty()) {
                         var e = mm.entries().iterator().next();
@@ -771,12 +771,12 @@ public final class Profiler {
                         }
                     }
                 } catch (Throwable t) {
-                    plugin.getLogger().info("[Sktrace diag] " + f.getName() + ": (failed: " + t.getMessage() + ")");
+                    plugin.getLogger().info("[skTrace diag] " + f.getName() + ": (failed: " + t.getMessage() + ")");
                 }
             }
-            plugin.getLogger().info("[Sktrace diag] === end ===");
+            plugin.getLogger().info("[skTrace diag] === end ===");
         } catch (Throwable t) {
-            plugin.getLogger().log(Level.WARNING, "[Sktrace diag] failed: " + t.getMessage(), t);
+            plugin.getLogger().log(Level.WARNING, "[skTrace diag] failed: " + t.getMessage(), t);
         }
     }
 
@@ -1153,7 +1153,7 @@ public final class Profiler {
             // level. Bail if the reachable set explodes — best-effort guard.
             Set<TriggerItem> allItems = Collections.newSetFromMap(new IdentityHashMap<>());
             if (!collectReachable(trigger, firstField, nextField, allItems, MAX_REACHABLE_ITEMS)) {
-                plugin.getLogger().fine("[Sktrace] Skipping per-line tracing for "
+                plugin.getLogger().fine("[skTrace] Skipping per-line tracing for "
                         + triggerId + ": > " + MAX_REACHABLE_ITEMS + " reachable items");
                 return;
             }
@@ -1173,7 +1173,7 @@ public final class Profiler {
 
             if (ctx.bailed) {
                 restoreRewire(rewire);
-                plugin.getLogger().fine("[Sktrace] Per-line tracing bailed for " + triggerId
+                plugin.getLogger().fine("[skTrace] Per-line tracing bailed for " + triggerId
                         + " (cycle/cap/anomaly); per-trigger timing still active.");
                 return;
             }
@@ -1181,13 +1181,13 @@ public final class Profiler {
             itemStats.put(triggerId, ctx.stats);
             bodyRewires.add(rewire);
             plugin.getLogger().log(Level.FINE,
-                    "[Sktrace] Installed per-line tracers on " + triggerId
+                    "[skTrace] Installed per-line tracers on " + triggerId
                             + " (" + ctx.stats.size() + " units, recursed into loops)");
         } catch (Throwable t) {
             // Undo any partial rewiring so the trigger runs exactly as before.
             try { rewire.restoreAll(); } catch (Throwable ignored) { }
             plugin.getLogger().log(Level.WARNING,
-                    "[Sktrace] Per-line tracer install failed for " + triggerId
+                    "[skTrace] Per-line tracer install failed for " + triggerId
                             + ": " + t.getMessage(), t);
         }
     }
@@ -1334,7 +1334,7 @@ public final class Profiler {
                     for (int k = idxMark; k < ctx.nextIdx; k++) ctx.stats.remove(k);
                     ctx.nextIdx = idxMark;
                     ctx.bailed = false;
-                    plugin.getLogger().fine("[Sktrace] Kept loop as a single unit (couldn't deepen its body) at depth " + depth);
+                    plugin.getLogger().fine("[skTrace] Kept loop as a single unit (couldn't deepen its body) at depth " + depth);
                 }
             }
         }
@@ -1534,7 +1534,7 @@ public final class Profiler {
                 restoreRewire(bodyRewires.get(i));
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING,
-                        "[Sktrace] Failed to restore body tracers: " + t.getMessage(), t);
+                        "[skTrace] Failed to restore body tracers: " + t.getMessage(), t);
             }
         }
         bodyRewires.clear();
@@ -1677,7 +1677,7 @@ public final class Profiler {
         try {
             tasks = new ArrayList<>(Bukkit.getScheduler().getPendingTasks());
         } catch (Throwable t) {
-            plugin.getLogger().warning("[Sktrace] Could not enumerate scheduler tasks: " + t.getMessage());
+            plugin.getLogger().warning("[skTrace] Could not enumerate scheduler tasks: " + t.getMessage());
             return;
         }
 
@@ -1693,21 +1693,21 @@ public final class Profiler {
                 int found = schedulerSwaps.size() - before;
                 if (found == 0) {
                     plugin.getLogger().log(Level.FINE,
-                            "[Sktrace]   task runnable class=" + runnable.getClass().getName()
+                            "[skTrace]   task runnable class=" + runnable.getClass().getName()
                                     + " - no Trigger found");
                 }
                 hooked += found;
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.FINE,
-                        "[Sktrace] Failed to scan scheduler task: " + t.getMessage());
+                        "[skTrace] Failed to scan scheduler task: " + t.getMessage());
             }
         }
-        plugin.getLogger().info("[Sktrace] Scanned " + tasksScanned
+        plugin.getLogger().info("[skTrace] Scanned " + tasksScanned
                 + " Skript scheduler tasks; hooked " + hooked + " periodic-trigger references.");
 
         // Second pass: walk every loaded Script's structures and grab Triggers from there.
         int scriptHooked = installScriptStructureHooks();
-        plugin.getLogger().info("[Sktrace] Script-structure scan hooked " + scriptHooked + " additional triggers.");
+        plugin.getLogger().info("[skTrace] Script-structure scan hooked " + scriptHooked + " additional triggers.");
     }
 
     private int installScriptStructureHooks() {
@@ -1718,12 +1718,12 @@ public final class Profiler {
             try {
                 getLoaded = scriptLoaderClass.getMethod("getLoadedScripts");
             } catch (NoSuchMethodException nsme) {
-                plugin.getLogger().info("[Sktrace] ScriptLoader.getLoadedScripts() not found - skipping script scan");
+                plugin.getLogger().info("[skTrace] ScriptLoader.getLoadedScripts() not found - skipping script scan");
                 return 0;
             }
             Object scriptsObj = getLoaded.invoke(null);
             if (!(scriptsObj instanceof Iterable<?> scripts)) {
-                plugin.getLogger().info("[Sktrace] Loaded scripts not iterable: "
+                plugin.getLogger().info("[skTrace] Loaded scripts not iterable: "
                         + (scriptsObj == null ? "null" : scriptsObj.getClass().getName()));
                 return 0;
             }
@@ -1734,10 +1734,10 @@ public final class Profiler {
                 swapTriggerFieldsDeep(script, 0, new java.util.IdentityHashMap<>());
                 hooked += schedulerSwaps.size() - before;
             }
-            plugin.getLogger().info("[Sktrace] Walked " + scriptCount + " loaded scripts.");
+            plugin.getLogger().info("[skTrace] Walked " + scriptCount + " loaded scripts.");
             return hooked;
         } catch (Throwable t) {
-            plugin.getLogger().log(Level.FINE, "[Sktrace] Script-structure scan failed: " + t.getMessage());
+            plugin.getLogger().log(Level.FINE, "[skTrace] Script-structure scan failed: " + t.getMessage());
             return 0;
         }
     }
@@ -1772,7 +1772,7 @@ public final class Profiler {
                             }
                         } catch (Throwable t) {
                             plugin.getLogger().log(Level.FINE,
-                                    "[Sktrace] swap failed at depth " + depth + ": " + t.getMessage());
+                                    "[skTrace] swap failed at depth " + depth + ": " + t.getMessage());
                         }
                     } else if (depth < 3 && shouldRecurse(v)) {
                         swapTriggerFieldsDeep(v, depth + 1, visited);
@@ -1852,10 +1852,10 @@ public final class Profiler {
             try {
                 if (wrapFunction(fn)) hooked++;
             } catch (Throwable t) {
-                plugin.getLogger().log(Level.FINE, "[Sktrace] Function wrap failed: " + t.getMessage());
+                plugin.getLogger().log(Level.FINE, "[skTrace] Function wrap failed: " + t.getMessage());
             }
         }
-        plugin.getLogger().info("[Sktrace] Enumerated " + functions.size()
+        plugin.getLogger().info("[skTrace] Enumerated " + functions.size()
                 + " functions; hooked " + hooked + " script function(s)"
                 + (lineLevelTracing ? " with per-line tracing." : "."));
     }
@@ -1874,14 +1874,14 @@ public final class Profiler {
             Object elements = frClass.getMethod("elements").invoke(registry);
             if (elements instanceof Collection<?> col) out.addAll(col);
         } catch (Throwable t) {
-            plugin.getLogger().fine("[Sktrace] FunctionRegistry enumeration unavailable: " + t.getMessage());
+            plugin.getLogger().fine("[skTrace] FunctionRegistry enumeration unavailable: " + t.getMessage());
         }
         try {
             Class<?> fnsClass = Class.forName("ch.njol.skript.lang.function.Functions");
             collectNamespaceFunctions(fnsClass, "namespaces", out);
             collectNamespaceFunctions(fnsClass, "globalFunctions", out);
         } catch (Throwable t) {
-            plugin.getLogger().fine("[Sktrace] Legacy Functions enumeration unavailable: " + t.getMessage());
+            plugin.getLogger().fine("[skTrace] Legacy Functions enumeration unavailable: " + t.getMessage());
         }
         return new ArrayList<>(out);
     }
@@ -1954,7 +1954,7 @@ public final class Profiler {
                 }
             } catch (Throwable t) {
                 plugin.getLogger().log(Level.WARNING,
-                        "[Sktrace] Failed to restore function trigger: " + t.getMessage(), t);
+                        "[skTrace] Failed to restore function trigger: " + t.getMessage(), t);
             }
         }
         functionSwaps.clear();

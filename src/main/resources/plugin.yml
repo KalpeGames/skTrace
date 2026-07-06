@@ -1,6 +1,6 @@
-name: Sktrace
+name: skTrace
 version: ${project.version}
-main: dev.sktrace.Sktrace
+main: dev.sktrace.SkTrace
 api-version: '1.20'
 authors: [KALPE]
 description: Skript-aware profiler. Surfaces which scripts, triggers, and events are eating tick time.
@@ -8,11 +8,13 @@ depend: [Skript]
 softdepend: [spark]
 commands:
   sktrace:
-    description: Sktrace profiler commands.
+    description: skTrace profiler commands.
     usage: |
       /<command> start - begin profiling
       /<command> stop - stop profiling
       /<command> status - show current profile summary
+      /<command> parse - show which lines are slow to PARSE (load-time audit)
+      /<command> confirm - confirm the disruptive parse-audit reload
       /<command> report - write report and upload for a shareable link
       /<command> clip - snapshot the last N seconds (requires rolling buffer)
       /<command> rolling on|off - toggle the always-on rolling buffer
@@ -22,5 +24,8 @@ commands:
     permission: sktrace.use
 permissions:
   sktrace.use:
-    description: Use Sktrace commands.
+    description: Use skTrace commands.
+    default: op
+  sktrace.audit.notify:
+    description: Be notified on join when a parse audit found lines worth improving.
     default: op

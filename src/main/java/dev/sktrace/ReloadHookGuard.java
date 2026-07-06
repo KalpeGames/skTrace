@@ -62,7 +62,7 @@ public final class ReloadHookGuard implements Listener {
     // resumeAfterReload() simply re-installs the hooks we removed.
     private static final long RESYNC_DEBOUNCE_TICKS = 40L; // ~2s
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final Profiler profiler;
 
     private BukkitTask pendingResync;
@@ -73,7 +73,7 @@ public final class ReloadHookGuard implements Listener {
     private Object unloadProxy;
     private Object loadProxy;
 
-    public ReloadHookGuard(Sktrace plugin, Profiler profiler) {
+    public ReloadHookGuard(SkTrace plugin, Profiler profiler) {
         this.plugin = plugin;
         this.profiler = profiler;
     }
@@ -88,14 +88,14 @@ public final class ReloadHookGuard implements Listener {
      */
     public void register() {
         if (tryRegisterLoaderEvents()) {
-            plugin.getLogger().info("[Sktrace] Reload guard: hooked Skript's script load/unload events.");
+            plugin.getLogger().info("[skTrace] Reload guard: hooked Skript's script load/unload events.");
             return;
         }
         PluginManager pm = plugin.getServer().getPluginManager();
         pm.registerEvents(this, plugin);
         pm.registerEvent(PreScriptLoadEvent.class, this, EventPriority.MONITOR,
                 (listener, event) -> onScriptLoadSignal(), plugin);
-        plugin.getLogger().info("[Sktrace] Reload guard: this Skript has no script load/unload "
+        plugin.getLogger().info("[skTrace] Reload guard: this Skript has no script load/unload "
                 + "events; falling back to reload-command detection. Reloads started "
                 + "programmatically (not typed by a player or the console) cannot be detected "
                 + "on this Skript version.");
@@ -116,7 +116,7 @@ public final class ReloadHookGuard implements Listener {
             if (unloadProxy != null) unreg.invoke(eventRegistry, unloadProxy);
             if (loadProxy != null) unreg.invoke(eventRegistry, loadProxy);
         } catch (Throwable t) {
-            plugin.getLogger().fine("[Sktrace] Could not unregister loader events: " + t.getMessage());
+            plugin.getLogger().fine("[skTrace] Could not unregister loader events: " + t.getMessage());
         }
         eventRegistry = null;
         unloadProxy = null;
@@ -174,14 +174,14 @@ public final class ReloadHookGuard implements Listener {
                 try {
                     callback.run();
                 } catch (Throwable t) {
-                    plugin.getLogger().fine("[Sktrace] Reload guard callback failed: " + t.getMessage());
+                    plugin.getLogger().fine("[skTrace] Reload guard callback failed: " + t.getMessage());
                 }
                 return null;
             }
             return switch (name) {
                 case "equals" -> proxy == args[0];
                 case "hashCode" -> System.identityHashCode(proxy);
-                case "toString" -> "Sktrace." + callbackName;
+                case "toString" -> "SkTrace." + callbackName;
                 default -> null;
             };
         };

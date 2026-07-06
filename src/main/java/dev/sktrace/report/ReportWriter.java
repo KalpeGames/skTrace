@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Billy
 package dev.sktrace.report;
 
-import dev.sktrace.Sktrace;
+import dev.sktrace.SkTrace;
 import dev.sktrace.profiler.EventStats;
 import dev.sktrace.profiler.ItemStats;
 import dev.sktrace.profiler.LoopWatcher;
@@ -33,10 +33,10 @@ public final class ReportWriter {
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
     private static final DateTimeFormatter HUMAN_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    private final Sktrace plugin;
+    private final SkTrace plugin;
     private final Profiler profiler;
 
-    public ReportWriter(Sktrace plugin, Profiler profiler) {
+    public ReportWriter(SkTrace plugin, Profiler profiler) {
         this.plugin = plugin;
         this.profiler = profiler;
     }
@@ -578,7 +578,7 @@ public final class ReportWriter {
                 } catch (IOException ignored) {}
             }
         } catch (Throwable t) {
-            plugin.getLogger().fine("[Sktrace] Failed to load script sources: " + t.getMessage());
+            plugin.getLogger().fine("[skTrace] Failed to load script sources: " + t.getMessage());
         }
         return out;
     }
